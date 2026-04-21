@@ -2,7 +2,12 @@
 
 export DH_VERBOSE = 1
 export DH_GOPKG := github.com/tg123/sshpiper
-export GOFLAGS := -mod=vendor -trimpath
+# `full` build tag includes the optional upstream plugins
+# (docker/failtoban/fixed/lua/metrics/simplemath/username-router/yaml).
+# Without it, those plugins' main.go is gated off by `//go:build full || e2e`
+# and `go build` fails with "build constraints exclude all Go files".
+# Harmless on cmd/sshpiperd which doesn't use the `full` tag.
+export GOFLAGS := -mod=vendor -trimpath -tags=full
 export GO111MODULE := on
 # Launchpad builders have no network; vendored deps only.
 export GOPROXY := off
