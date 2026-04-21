@@ -11,12 +11,18 @@ export GOFLAGS := -mod=vendor -trimpath -tags=full
 export GO111MODULE := on
 # Launchpad builders have no network; vendored deps only.
 export GOPROXY := off
-# Upstream declares `go 1.25.0` in go.mod — build-source-package.sh lowers
-# that to `go 1.24` and strips the `toolchain` directive so Go doesn't try
-# to auto-download a newer toolchain (GOPROXY=off would block it anyway).
-# Pull Go 1.24 explicitly onto PATH; noble's stock golang-go is 1.22.
-export PATH := /usr/lib/go-1.24/bin:$(PATH)
+# Pick the highest Go actually installed in the chroot. Build-Depends
+# lists golang-1.25-go | golang-1.24-go, so apt resolves to whichever
+# is available for the target series (1.25 on resolute Release, 1.24
+# on noble-updates). build-source-package.sh already lowers upstream's
+# `go 1.25.0` directive to `go 1.24` — newer Go compiles it fine.
+GO_BINDIR := $(firstword $(wildcard /usr/lib/go-1.25/bin /usr/lib/go-1.24/bin))
+ifeq ($(GO_BINDIR),)
+$(error No /usr/lib/go-{1.25,1.24}/bin found — check Build-Depends)
+endif
+export PATH := $(GO_BINDIR):$(PATH)
 # Belt-and-braces: never let Go try to fetch a different toolchain.
+# Launchpad's GOPROXY=off would block it anyway, but this fails fast.
 export GOTOOLCHAIN := local
 
 BUILDDIR := $(CURDIR)/_build
