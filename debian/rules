@@ -11,6 +11,13 @@ export GOFLAGS := -mod=vendor -trimpath -tags=full
 export GO111MODULE := on
 # Launchpad builders have no network; vendored deps only.
 export GOPROXY := off
+# Upstream declares `go 1.25.0` in go.mod — build-source-package.sh lowers
+# that to `go 1.24` and strips the `toolchain` directive so Go doesn't try
+# to auto-download a newer toolchain (GOPROXY=off would block it anyway).
+# Pull Go 1.24 explicitly onto PATH; noble's stock golang-go is 1.22.
+export PATH := /usr/lib/go-1.24/bin:$(PATH)
+# Belt-and-braces: never let Go try to fetch a different toolchain.
+export GOTOOLCHAIN := local
 
 BUILDDIR := $(CURDIR)/_build
 BINDIR   := $(BUILDDIR)/bin

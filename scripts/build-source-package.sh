@@ -75,6 +75,16 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     echo "==> SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} (from upstream commit)"
 fi
 
+echo "==> Relaxing go.mod: drop toolchain, cap go directive to 1.24"
+# Launchpad builders have no network during build (GOPROXY=off), so the
+# `toolchain` directive's auto-download fails. Noble also only carries
+# Go up to 1.24 in noble-updates, whereas upstream declares `go 1.25.0`.
+# Stripping the toolchain and lowering the go directive lets Go 1.24
+# compile the module. If upstream ever uses a genuine 1.25 language
+# feature this will surface as a compile error and we'll revisit.
+sed -i '/^toolchain /d' go.mod
+sed -i -E 's/^go [0-9]+\.[0-9]+(\.[0-9]+)?$/go 1.24/' go.mod
+
 echo "==> Removing upstream VCS state and .github (keep submodule contents)"
 # `.git` in a submodule is a file pointing at the parent's .git/modules dir;
 # removing it detaches the submodule but leaves its files in place, which is
