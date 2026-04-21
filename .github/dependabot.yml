@@ -1,0 +1,16 @@
+version: 2
+
+updates:
+  # Keep GitHub Actions pinned-SHAs fresh. Dependabot understands SHA pins
+  # with a trailing `# vX.Y.Z` comment and opens a PR when upstream releases
+  # a new version, updating both the SHA and the comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
