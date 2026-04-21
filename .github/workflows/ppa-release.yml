@@ -143,7 +143,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             devscripts debhelper dh-golang golang-go \
             dput-ng gnupg git jq xz-utils ca-certificates \
-            distro-info distro-info-data
+            distro-info distro-info-data lintian
 
       - name: Import signing subkey (inline, no third-party action)
         env:
@@ -212,6 +212,21 @@ jobs:
             | "${PRESET}" --preset "${KEYGRIP}"
 
           ./scripts/build-source-package.sh
+
+      - name: Lintian source-package QA
+        run: |
+          set -euo pipefail
+          # Run Debian's own package QA tool against our built .dsc. Launchpad
+          # also runs lintian on ingestion, so surfacing issues here avoids
+          # uploading something that'll be flagged (or silently rejected)
+          # downstream. --info gives human-readable explanations; --display-info
+          # lowers the output floor to include "informational" tags too.
+          #
+          # We don't fail the build on lintian findings today — a handful of
+          # informational tags are typical for Go packaging and we haven't
+          # triaged them all yet. Review output manually until the set is
+          # clean, then drop the `|| true` to enforce.
+          lintian --info --display-info build/sshpiperd_*.dsc || true
 
       - name: Upload source package to Launchpad
         run: |

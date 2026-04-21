@@ -1,0 +1,67 @@
+name: lint
+
+# Static checks on every push and PR. Runs with read-only tokens and no
+# access to the ppa-release Environment, so even if a lint dependency were
+# compromised it couldn't sign or upload anything.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install and run actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+        run: |
+          set -euo pipefail
+          # Pin both the installer script and the binary it fetches to the
+          # same release tag — no floating `main`.
+          curl -fsSL -o /tmp/download-actionlint.bash \
+            "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash"
+          bash /tmp/download-actionlint.bash "${ACTIONLINT_VERSION}"
+          ./actionlint -color
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Check scripts
+        run: |
+          set -euo pipefail
+          # Find and check every .sh under scripts/. --severity=style is
+          # the strictest level; drop to warning/error if noise gets high.
+          find scripts -type f -name '*.sh' -print0 \
+            | xargs -0 shellcheck --severity=style --color=always
