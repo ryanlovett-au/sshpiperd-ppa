@@ -1,0 +1,36 @@
+Source: sshpiperd
+Section: net
+Priority: optional
+Maintainer: Ryan Lovett <ryan@pixelated.cloud>
+Build-Depends:
+ debhelper-compat (= 13),
+ golang-go (>= 2:1.22~),
+ dh-golang
+Standards-Version: 4.6.2
+Homepage: https://github.com/tg123/sshpiper
+Vcs-Browser: https://github.com/tg123/sshpiper
+Vcs-Git: https://github.com/tg123/sshpiper.git
+Rules-Requires-Root: no
+
+Package: sshpiperd
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ adduser
+Recommends: sshpiperd-plugins
+Description: SSH reverse proxy / connection router
+ sshpiperd routes incoming SSH connections to upstream servers based on
+ pluggable logic. Useful for bastion hosts, multi-tenant gateways, and
+ per-user routing without shell accounts on the proxy itself.
+
+Package: sshpiperd-plugins
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ sshpiperd (= ${binary:Version})
+Description: sshpiperd bundled upstream plugins
+ Ships the gRPC-capable upstream plugins (workingdir, yaml, ldap, etc.)
+ built from the sshpiper source tree. Install alongside sshpiperd to
+ enable plugin-based routing.

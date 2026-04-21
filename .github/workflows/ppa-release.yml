@@ -1,0 +1,213 @@
+name: ppa-release
+
+# Poll upstream tg123/sshpiper for new tags, build a signed Debian source
+# package for each target Ubuntu series, and dput it to the Launchpad PPA.
+#
+# Security posture (see README.md "Release hardening"):
+#   * All third-party actions pinned to commit SHAs, never tags.
+#   * Minimum `permissions:` per job.
+#   * Upload job runs in the `ppa-release` Environment, which requires a
+#     manual reviewer approval before secrets are exposed.
+#   * Signing key in secrets is a dedicated sign-only SUBKEY (the master
+#     key for this PPA identity lives offline). Rotate annually.
+#   * GPG import is inline — no third-party key-handling actions.
+#
+# TODO before first run:
+#   1. Replace every `PIN_SHA_…` placeholder below with the real commit SHA
+#      for the action at the tag noted in the trailing comment. Verify the
+#      SHA is reachable from the action's repo and signed by the owner.
+#   2. Create GitHub Environment `ppa-release` with yourself as a required
+#      reviewer, and attach secrets (GPG_PRIVATE_KEY, GPG_PASSPHRASE,
+#      GPG_KEY_ID) to the Environment — NOT to the repo.
+#   3. Upload the signing subkey's public half to Launchpad and confirm
+#      the fingerprint matches GPG_KEY_ID.
+
+on:
+  schedule:
+    # Poll upstream daily at 06:17 UTC (off-peak, avoids the top of the hour).
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to build (e.g. v1.3.16). Leave blank to auto-detect latest.'
+        required: false
+        default: ''
+      series:
+        description: 'Comma-separated Ubuntu series (e.g. noble,jammy).'
+        required: false
+        default: 'noble'
+
+# No permissions by default — each job opts in to what it needs.
+permissions: {}
+
+concurrency:
+  group: ppa-release
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect upstream release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+      series: ${{ steps.resolve.outputs.series }}
+    steps:
+      - name: Checkout packaging repo
+        uses: actions/checkout@PIN_SHA_checkout_v4 # v4.x — replace with real SHA
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve target tag + series
+        id: resolve
+        env:
+          MANUAL_TAG: ${{ inputs.upstream_tag }}
+          MANUAL_SERIES: ${{ inputs.series }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MANUAL_TAG}" ]; then
+            TAG="${MANUAL_TAG}"
+          else
+            # Latest non-prerelease upstream tag. Use the GitHub API with no
+            # auth (public repo, 60 req/hr/IP is plenty for a daily poll).
+            TAG="$(curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              https://api.github.com/repos/tg123/sshpiper/releases/latest \
+              | jq -r '.tag_name')"
+          fi
+          echo "Resolved upstream tag: ${TAG}"
+
+          # Have we already built this tag? We record successful builds as
+          # annotated git tags in this repo of the form built/<series>/<tag>.
+          SERIES="${MANUAL_SERIES:-noble}"
+          SHOULD=false
+          for s in $(echo "${SERIES}" | tr ',' ' '); do
+            if ! git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
+              SHOULD=true
+            fi
+          done
+
+          echo "tag=${TAG}"            >> "$GITHUB_OUTPUT"
+          echo "series=${SERIES}"      >> "$GITHUB_OUTPUT"
+          echo "should_build=${SHOULD}" >> "$GITHUB_OUTPUT"
+
+  build-and-upload:
+    name: Build & upload (${{ matrix.series }})
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    # Manual approval gate. Secrets only expand inside this environment.
+    environment: ppa-release
+    permissions:
+      contents: write  # needed to push the built/<series>/<tag> marker tag
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ${{ fromJSON(format('["{0}"]', needs.detect.outputs.series)) }}
+        # NOTE: if `series` is comma-separated this simple cast won't split it.
+        # Swap for `jq -Rc 'split(",")'` fed via a prior job output if you
+        # ever target multiple series in a single run. For now, noble-only.
+    steps:
+      - name: Checkout packaging repo
+        uses: actions/checkout@PIN_SHA_checkout_v4 # v4.x — replace with real SHA
+        with:
+          persist-credentials: false
+
+      - name: Install build tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            devscripts debhelper dh-golang golang-go \
+            dput-ng gnupg git jq xz-utils ca-certificates
+
+      - name: Import signing subkey (inline, no third-party action)
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_ID:      ${{ secrets.GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME
+          GNUPGHOME="$(mktemp -d)"
+          echo "GNUPGHOME=${GNUPGHOME}" >> "$GITHUB_ENV"
+          chmod 700 "${GNUPGHOME}"
+
+          # Loopback pinentry so the passphrase can come from stdin.
+          cat > "${GNUPGHOME}/gpg.conf" <<'EOF'
+          pinentry-mode loopback
+          batch
+          no-tty
+          EOF
+          cat > "${GNUPGHOME}/gpg-agent.conf" <<'EOF'
+          allow-loopback-pinentry
+          EOF
+
+          printf '%s' "${GPG_PRIVATE_KEY}" | gpg --batch --import
+
+          # Sanity: the imported key must contain the expected fingerprint.
+          if ! gpg --list-secret-keys --with-colons \
+              | awk -F: '$1=="fpr"{print $10}' \
+              | grep -qx "${GPG_KEY_ID}"; then
+            echo "::error::Imported key does not contain expected fingerprint ${GPG_KEY_ID}" >&2
+            exit 1
+          fi
+          # Mark it ultimately trusted so dpkg-buildpackage will sign.
+          echo "${GPG_KEY_ID}:6:" | gpg --import-ownertrust
+
+      - name: Build source package
+        env:
+          UPSTREAM_TAG:    ${{ needs.detect.outputs.tag }}
+          SERIES:          ${{ matrix.series }}
+          PPA_REV:         '1'
+          DEBFULLNAME:     'Ryan Lovett'
+          DEBEMAIL:        'ryan@pixelated.cloud'
+          GPG_KEY_ID:      ${{ secrets.GPG_KEY_ID }}
+          GPG_PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Feed passphrase to gpg-agent ahead of dpkg-buildpackage.
+          echo "${GPG_PASSPHRASE}" | gpg --batch --pinentry-mode loopback \
+              --passphrase-fd 0 --sign --local-user "${GPG_KEY_ID}" \
+              -o /dev/null <<<'cache-warmup'
+          ./scripts/build-source-package.sh
+
+      - name: Upload source package to Launchpad
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.config/dput-ng/profiles
+          cat > ~/.dput.cf <<'EOF'
+          [ryanlovett-sshpiperd]
+          fqdn = ppa.launchpad.net
+          method = ftp
+          incoming = ~ryanlovett/ubuntu/sshpiperd/
+          login = anonymous
+          allow_unsigned_uploads = 0
+          EOF
+          dput ryanlovett-sshpiperd build/sshpiperd_*_source.changes
+
+      - name: Record successful upload as a marker tag
+        env:
+          UPSTREAM_TAG: ${{ needs.detect.outputs.tag }}
+          SERIES:       ${{ matrix.series }}
+          GH_TOKEN:     ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="built/${SERIES}/${UPSTREAM_TAG}"
+          git -c user.name='sshpiperd-ppa-bot' \
+              -c user.email='ryan@pixelated.cloud' \
+              tag -a "${TAG}" -m "Uploaded ${UPSTREAM_TAG} for ${SERIES} to PPA"
+          git push origin "${TAG}"
+
+      - name: Scrub GPG material
+        if: always()
+        run: |
+          set -eu
+          if [ -n "${GNUPGHOME:-}" ] && [ -d "${GNUPGHOME}" ]; then
+            find "${GNUPGHOME}" -type f -exec shred -u {} + || true
+            rm -rf "${GNUPGHOME}"
+          fi

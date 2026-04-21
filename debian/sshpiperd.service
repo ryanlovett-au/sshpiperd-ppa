@@ -1,0 +1,42 @@
+[Unit]
+Description=sshpiperd SSH reverse proxy
+Documentation=https://github.com/tg123/sshpiper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sshpiperd
+Group=sshpiperd
+EnvironmentFile=-/etc/default/sshpiperd
+ExecStart=/usr/sbin/sshpiperd $SSHPIPERD_OPTS
+Restart=on-failure
+RestartSec=5s
+
+# Allow binding to :2222 etc. without root. Drop this if binding >=1024 only.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+ReadWritePaths=/var/lib/sshpiperd
+StateDirectory=sshpiperd
+ConfigurationDirectory=sshpiperd
+
+[Install]
+WantedBy=multi-user.target

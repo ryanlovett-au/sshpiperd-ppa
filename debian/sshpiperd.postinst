@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if ! getent group sshpiperd >/dev/null; then
+            addgroup --system sshpiperd
+        fi
+        if ! getent passwd sshpiperd >/dev/null; then
+            adduser --system --ingroup sshpiperd \
+                    --home /var/lib/sshpiperd \
+                    --no-create-home \
+                    --shell /usr/sbin/nologin \
+                    --gecos "sshpiperd daemon" \
+                    sshpiperd
+        fi
+
+        # State & config dirs. systemd also ensures these via StateDirectory=
+        # and ConfigurationDirectory=, but create here so the package is
+        # usable before the unit starts.
+        install -d -o sshpiperd -g sshpiperd -m 0750 /var/lib/sshpiperd
+        install -d -o root      -g sshpiperd -m 0750 /etc/sshpiperd
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

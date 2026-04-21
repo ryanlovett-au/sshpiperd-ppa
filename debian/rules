@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DH_GOPKG := github.com/tg123/sshpiper
+export GOFLAGS := -mod=vendor -trimpath
+export GO111MODULE := on
+# Launchpad builders have no network; vendored deps only.
+export GOPROXY := off
+
+BUILDDIR := $(CURDIR)/_build
+BINDIR   := $(BUILDDIR)/bin
+
+# Plugins discovered at build time from plugin/*/main.go.
+# Tweak this list if upstream layout changes.
+PLUGINS := $(notdir $(patsubst %/,%,$(dir $(wildcard plugin/*/main.go))))
+
+%:
+	dh $@ --buildsystem=golang --with=golang
+
+override_dh_auto_build:
+	mkdir -p $(BINDIR)
+	go build -o $(BINDIR)/sshpiperd ./cmd/sshpiperd
+	for p in $(PLUGINS); do \
+	  go build -o $(BINDIR)/sshpiperd-plugin-$$p ./plugin/$$p || exit 1; \
+	done
+
+override_dh_auto_install:
+	# sshpiperd package
+	install -D -m0755 $(BINDIR)/sshpiperd \
+	  debian/sshpiperd/usr/sbin/sshpiperd
+	install -d debian/sshpiperd/etc/sshpiperd
+	install -d debian/sshpiperd/var/lib/sshpiperd
+	# sshpiperd-plugins package
+	for p in $(PLUGINS); do \
+	  install -D -m0755 $(BINDIR)/sshpiperd-plugin-$$p \
+	    debian/sshpiperd-plugins/usr/lib/sshpiperd/plugins/$$p; \
+	done
+
+override_dh_auto_test:
+	# Skip upstream tests during package build — they need network/fixtures.
+
+override_dh_auto_clean:
+	rm -rf $(BUILDDIR)
+	dh_auto_clean

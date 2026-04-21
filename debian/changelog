@@ -1,0 +1,7 @@
+sshpiperd (0.0.0-0ppa1~noble1) noble; urgency=medium
+
+  * Initial packaging bootstrap entry. This entry is a placeholder —
+    scripts/build-source-package.sh rewrites the version, distribution,
+    and upstream tag before each Launchpad upload.
+
+ -- Ryan Lovett <ryan@pixelated.cloud>  Tue, 21 Apr 2026 00:00:00 +0000

@@ -1,0 +1,5 @@
+# Options passed to sshpiperd by the systemd unit.
+# See: sshpiperd --help
+# Example: listen on 2222 and use the workingdir plugin:
+#SSHPIPERD_OPTS="--listen-addr 0.0.0.0 --port 2222 --upstream-driver plugin --plugin /usr/lib/sshpiperd/plugins/workingdir"
+SSHPIPERD_OPTS=""

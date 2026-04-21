@@ -1,0 +1,14 @@
+# Build artifacts from scripts/build-source-package.sh
+/build/
+
+# GPG key material — should never end up in this repo.
+# ($GNUPGHOME lives outside the repo, but guard against stray exports.)
+*.asc
+*.gpg
+*.key
+
+# Claude Code local state.
+.claude/
+
+# macOS.
+.DS_Store
