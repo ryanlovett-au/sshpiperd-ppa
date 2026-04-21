@@ -40,15 +40,26 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$(mktemp -d -t sshpiperd-ppa.XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-echo "==> Cloning ${UPSTREAM_REPO} at ${UPSTREAM_TAG}"
-git clone --depth 1 --branch "${UPSTREAM_TAG}" "${UPSTREAM_REPO}" \
-    "${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
+echo "==> Cloning ${UPSTREAM_REPO} at ${UPSTREAM_TAG} (with submodules)"
+# Upstream uses a `crypto` submodule (their fork of golang.org/x/crypto
+# with SSH protocol patches). go.mod declares
+#   replace golang.org/x/crypto => ./crypto
+# so the submodule contents MUST be present at build time.
+git clone --depth 1 --branch "${UPSTREAM_TAG}" \
+          --recurse-submodules --shallow-submodules \
+          "${UPSTREAM_REPO}" \
+          "${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
 
 SRCDIR="${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
 cd "${SRCDIR}"
 
-echo "==> Removing upstream .git and any non-reproducible state"
-rm -rf .git .github
+echo "==> Removing upstream VCS state and .github (keep submodule contents)"
+# `.git` in a submodule is a file pointing at the parent's .git/modules dir;
+# removing it detaches the submodule but leaves its files in place, which is
+# what we want in a source tarball.
+find . -name .git -print0 | xargs -0 rm -rf
+rm -f .gitmodules
+rm -rf .github
 
 echo "==> Vendoring Go dependencies (Launchpad builders have no network)"
 go mod vendor
