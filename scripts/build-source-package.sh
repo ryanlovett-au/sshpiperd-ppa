@@ -75,16 +75,6 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     echo "==> SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} (from upstream commit)"
 fi
 
-echo "==> Relaxing go.mod: drop toolchain, cap go directive to 1.24"
-# Launchpad builders have no network during build (GOPROXY=off), so the
-# `toolchain` directive's auto-download fails. Noble also only carries
-# Go up to 1.24 in noble-updates, whereas upstream declares `go 1.25.0`.
-# Stripping the toolchain and lowering the go directive lets Go 1.24
-# compile the module. If upstream ever uses a genuine 1.25 language
-# feature this will surface as a compile error and we'll revisit.
-sed -i '/^toolchain /d' go.mod
-sed -i -E 's/^go [0-9]+\.[0-9]+(\.[0-9]+)?$/go 1.24/' go.mod
-
 echo "==> Removing upstream VCS state and .github (keep submodule contents)"
 # `.git` in a submodule is a file pointing at the parent's .git/modules dir;
 # removing it detaches the submodule but leaves its files in place, which is
@@ -94,7 +84,21 @@ rm -f .gitmodules
 rm -rf .github
 
 echo "==> Vendoring Go dependencies (Launchpad builders have no network)"
+# Vendor with upstream's go.mod intact, so the runner's Go can auto-fetch
+# whatever toolchain upstream declares (currently 1.25). We lower the
+# directive AFTER vendoring, below.
 go mod vendor
+
+echo "==> Relaxing go.mod: drop toolchain, cap go directive to 1.24"
+# Launchpad builders have no network during build (GOPROXY=off), so a
+# `toolchain` directive's auto-download would fail. Noble tops out at
+# Go 1.24 in noble-updates, whereas upstream declares `go 1.25.0`.
+# Strip the toolchain and lower the go directive so Go 1.24 accepts the
+# module. Newer Go (e.g. 1.25 on resolute) also compiles `go 1.24` modules
+# fine. If upstream ever uses a genuine 1.25-only language feature, the
+# Launchpad build for noble will surface it as a compile error.
+sed -i '/^toolchain /d' go.mod
+sed -i -E 's/^go [0-9]+\.[0-9]+(\.[0-9]+)?$/go 1.24/' go.mod
 
 echo "==> Overlaying debian/ tree from ${REPO_ROOT}"
 cp -a "${REPO_ROOT}/debian" ./debian
