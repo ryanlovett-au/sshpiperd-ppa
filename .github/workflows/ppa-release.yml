@@ -77,19 +77,39 @@ jobs:
           fi
           echo "Resolved upstream tag: ${TAG}"
 
-          # Have we already built this tag? We record successful builds as
-          # annotated git tags in this repo of the form built/<series>/<tag>.
+          # Split input "noble,resolute" (or just "noble") into an array,
+          # trimming whitespace. Empty string -> empty array.
           SERIES="${MANUAL_SERIES:-noble}"
-          SHOULD=false
-          for s in $(echo "${SERIES}" | tr ',' ' '); do
-            if ! git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
-              SHOULD=true
+          IFS=',' read -ra REQUESTED <<< "${SERIES}"
+
+          # Filter to only series that don't yet have a built/<series>/<tag>
+          # marker — avoids re-uploading to Launchpad (which would reject as
+          # duplicate) and skips work on the matrix leg too.
+          TO_BUILD=()
+          for raw in "${REQUESTED[@]}"; do
+            s="${raw// /}"  # strip spaces
+            [ -z "$s" ] && continue
+            if git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
+              echo "Skipping ${s}: already built for ${TAG}"
+            else
+              TO_BUILD+=("${s}")
             fi
           done
 
-          echo "tag=${TAG}"            >> "$GITHUB_OUTPUT"
-          echo "series=${SERIES}"      >> "$GITHUB_OUTPUT"
-          echo "should_build=${SHOULD}" >> "$GITHUB_OUTPUT"
+          # Emit series as a JSON array that the downstream matrix consumes
+          # via fromJSON(). Empty array -> should_build=false, no matrix legs.
+          if [ ${#TO_BUILD[@]} -eq 0 ]; then
+            SERIES_JSON='[]'
+            SHOULD=false
+          else
+            SERIES_JSON=$(printf '%s\n' "${TO_BUILD[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+            SHOULD=true
+          fi
+          echo "To build: ${SERIES_JSON}"
+
+          echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
+          echo "series=${SERIES_JSON}"      >> "$GITHUB_OUTPUT"
+          echo "should_build=${SHOULD}"     >> "$GITHUB_OUTPUT"
 
   build-and-upload:
     name: Build & upload (${{ matrix.series }})
@@ -103,10 +123,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        series: ${{ fromJSON(format('["{0}"]', needs.detect.outputs.series)) }}
-        # NOTE: if `series` is comma-separated this simple cast won't split it.
-        # Swap for `jq -Rc 'split(",")'` fed via a prior job output if you
-        # ever target multiple series in a single run. For now, noble-only.
+        series: ${{ fromJSON(needs.detect.outputs.series) }}
     steps:
       - name: Checkout packaging repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
