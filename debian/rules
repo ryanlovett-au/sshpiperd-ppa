@@ -74,6 +74,14 @@ override_dh_auto_install:
 override_dh_auto_test:
 	# Skip upstream tests during package build — they need network/fixtures.
 
+override_dh_dwz:
+	# Skip DWARF-info deduplication. Go compresses its own debug sections,
+	# so dwz refuses to touch them and returns exit 1 on jammy's older
+	# dwz (exits 0 on newer versions like in noble/resolute). dh_dwz treats
+	# exit 1 as failure and aborts the whole build. Skipping is the canonical
+	# Debian Go-packaging workaround — no size savings are lost because
+	# dwz wouldn't have done anything anyway.
+
 override_dh_auto_clean:
 	rm -rf $(BUILDDIR)
 	dh_auto_clean
