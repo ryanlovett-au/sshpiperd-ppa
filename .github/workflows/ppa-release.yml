@@ -12,15 +12,11 @@ name: ppa-release
 #     key for this PPA identity lives offline). Rotate annually.
 #   * GPG import is inline — no third-party key-handling actions.
 #
-# TODO before first run:
-#   1. Replace every `PIN_SHA_…` placeholder below with the real commit SHA
-#      for the action at the tag noted in the trailing comment. Verify the
-#      SHA is reachable from the action's repo and signed by the owner.
-#   2. Create GitHub Environment `ppa-release` with yourself as a required
-#      reviewer, and attach secrets (GPG_PRIVATE_KEY, GPG_PASSPHRASE,
-#      GPG_KEY_ID) to the Environment — NOT to the repo.
-#   3. Upload the signing subkey's public half to Launchpad and confirm
-#      the fingerprint matches GPG_KEY_ID.
+# When bumping an action version, replace the SHA and update the trailing
+# `# vX.Y.Z` comment. Resolve with:
+#   TAG=$(gh api /repos/OWNER/REPO/releases/latest --jq .tag_name)
+#   gh api /repos/OWNER/REPO/commits/"$TAG" --jq .sha
+# Verify the commit is GPG-signed by the maintainer before pinning.
 
 on:
   schedule:
@@ -56,7 +52,7 @@ jobs:
       series: ${{ steps.resolve.outputs.series }}
     steps:
       - name: Checkout packaging repo
-        uses: actions/checkout@PIN_SHA_checkout_v4 # v4.x — replace with real SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -113,7 +109,7 @@ jobs:
         # ever target multiple series in a single run. For now, noble-only.
     steps:
       - name: Checkout packaging repo
-        uses: actions/checkout@PIN_SHA_checkout_v4 # v4.x — replace with real SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
