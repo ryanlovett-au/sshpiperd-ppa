@@ -141,6 +141,7 @@ jobs:
           EOF
           cat > "${GNUPGHOME}/gpg-agent.conf" <<'EOF'
           allow-loopback-pinentry
+          allow-preset-passphrase
           EOF
 
           printf '%s' "${GPG_PRIVATE_KEY}" | gpg --batch --import
@@ -166,10 +167,25 @@ jobs:
           GPG_PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          # Feed passphrase to gpg-agent ahead of dpkg-buildpackage.
-          echo "${GPG_PASSPHRASE}" | gpg --batch --pinentry-mode loopback \
-              --passphrase-fd 0 --sign --local-user "${GPG_KEY_ID}" \
-              -o /dev/null <<<'cache-warmup'
+
+          # Restart gpg-agent so gpg-agent.conf changes take effect.
+          gpgconf --kill gpg-agent
+
+          # Preset the subkey passphrase into gpg-agent's cache so
+          # dpkg-buildpackage (→ debsign → gpg) can sign without prompting.
+          # Uses the subkey's keygrip, not its fingerprint.
+          KEYGRIP=$(gpg --list-secret-keys --with-keygrip --with-colons \
+                        "${GPG_KEY_ID}" \
+                    | awk -F: '/^ssb:/{f=1;next} f && /^grp:/{print $10; exit}')
+          if [ -z "${KEYGRIP}" ]; then
+            echo "::error::Could not determine subkey keygrip" >&2
+            exit 1
+          fi
+
+          PRESET="$(gpgconf --list-dirs libexecdir)/gpg-preset-passphrase"
+          printf '%s' "${GPG_PASSPHRASE}" \
+            | "${PRESET}" --preset "${KEYGRIP}"
+
           ./scripts/build-source-package.sh
 
       - name: Upload source package to Launchpad
