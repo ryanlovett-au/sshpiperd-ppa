@@ -74,7 +74,10 @@ done
 
 echo "==> Creating orig tarball"
 mkdir -p "${OUTDIR}"
-ORIG_TARBALL="${OUTDIR}/sshpiperd_${UPSTREAM_VERSION}.orig.tar.xz"
+# dpkg-source 3.0 (quilt) looks for the orig tarball at ../<pkg>_<ver>.orig.*
+# relative to the source directory, so stage it in WORKDIR (the parent of
+# SRCDIR) first. We'll move it to OUTDIR with the rest of the artifacts.
+ORIG_TARBALL="${WORKDIR}/sshpiperd_${UPSTREAM_VERSION}.orig.tar.xz"
 tar --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime="@${SOURCE_DATE_EPOCH:-$(date +%s)}" \
     -C "${WORKDIR}" -cJf "${ORIG_TARBALL}" \
@@ -108,6 +111,7 @@ dpkg-buildpackage "${BUILD_FLAGS[@]}"
 echo "==> Collecting artifacts into ${OUTDIR}"
 cd "${WORKDIR}"
 mv -v \
+    "sshpiperd_${UPSTREAM_VERSION}.orig.tar.xz" \
     "sshpiperd_${DEB_VERSION}.dsc" \
     "sshpiperd_${DEB_VERSION}.debian.tar."* \
     "sshpiperd_${DEB_VERSION}_source.changes" \
