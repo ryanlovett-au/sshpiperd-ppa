@@ -34,6 +34,22 @@ proper systemd integration, which is what we want on Ubuntu server hosts.
 No `debian/compat` file — `debhelper-compat (= 13)` in `debian/control` is
 the modern equivalent and the two are mutually exclusive.
 
+## Per-series plugin coverage
+
+sshpiper ships 10 plugins upstream: docker, failtoban, fixed, kubernetes,
+lua, metrics, simplemath, username-router, workingdir, yaml. Whether each
+plugin builds depends on the Go version available in the target Ubuntu
+series.
+
+| Series | Plugins shipped |
+|---|---|
+| resolute (26.04 LTS) | All 10 |
+| noble (24.04 LTS)    | All **except `kubernetes`** |
+
+The kubernetes plugin pulls in `k8s.io/{api,apimachinery,client-go,code-generator}` v0.35, which themselves declare `go 1.25.0` in their go.mod files. Go's vendor mode enforces every vendored module's `go` directive, so even building `sshpiperd` itself fails on a builder that has Go < 1.25. Noble currently tops out at Go 1.24 (in `noble-updates`).
+
+`scripts/build-source-package.sh` drops `plugin/kubernetes/` and the `k8s.io/*` direct requires on series that predate Go 1.25. When Ubuntu SRUs Go 1.25 into `noble-updates`, remove `noble` from the `case` block in that script and re-dispatch to get kubernetes onto noble.
+
 ---
 
 ## One-time bootstrap

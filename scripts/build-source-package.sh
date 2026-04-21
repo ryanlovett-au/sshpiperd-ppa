@@ -83,10 +83,31 @@ find . -name .git -print0 | xargs -0 rm -rf
 rm -f .gitmodules
 rm -rf .github
 
+# Drop plugin/kubernetes on series that lack Go 1.25 (currently anything
+# < resolute). The Kubernetes client-go v0.35 set declares `go 1.25.0` in
+# its own go.mod, and Go's vendor mode enforces every vendored module's
+# `go` directive — not just the one we're building. No other direct dep
+# of sshpiper v1.5.3 requires 1.25 (checked 2026-04-21), so dropping the
+# kubernetes plugin + its direct k8s.io/* requires is sufficient.
+#
+# Revisit when noble-updates (or the target series) ships Go 1.25.
+case "${SERIES}" in
+    noble|jammy|focal)
+        echo "==> ${SERIES} lacks Go 1.25 — dropping plugin/kubernetes and k8s.io/* deps"
+        rm -rf plugin/kubernetes
+        for pkg in $(go mod edit -json \
+                     | grep -o '"Path":[[:space:]]*"k8s\.io/[^"]*"' \
+                     | cut -d'"' -f4 | sort -u); do
+            echo "    go mod edit -droprequire=${pkg}"
+            go mod edit "-droprequire=${pkg}"
+        done
+        ;;
+esac
+
 echo "==> Vendoring Go dependencies (Launchpad builders have no network)"
-# Vendor with upstream's go.mod intact, so the runner's Go can auto-fetch
-# whatever toolchain upstream declares (currently 1.25). We lower the
-# directive AFTER vendoring, below.
+# Vendor with upstream's go.mod intact (minus any drops above), so the
+# runner's Go can auto-fetch whatever toolchain upstream declares. We
+# lower the directive AFTER vendoring, below.
 go mod vendor
 
 echo "==> Relaxing go.mod: drop toolchain, cap go directive to 1.24"
