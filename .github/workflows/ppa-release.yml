@@ -32,6 +32,10 @@ on:
         description: 'Comma-separated Ubuntu series (e.g. noble,resolute).'
         required: false
         default: 'noble,resolute'
+      upstream_suffix:
+        description: 'Optional suffix on the upstream version (e.g. "+p1") to move past a stuck Launchpad filename slot. Leave blank for normal releases.'
+        required: false
+        default: ''
 
 # No permissions by default — each job opts in to what it needs.
 permissions: {}
@@ -179,6 +183,7 @@ jobs:
       - name: Build source package
         env:
           UPSTREAM_TAG:    ${{ needs.detect.outputs.tag }}
+          UPSTREAM_SUFFIX: ${{ inputs.upstream_suffix }}
           SERIES:          ${{ matrix.series }}
           PPA_REV:         '1'
           DEBFULLNAME:     'Ryan Lovett'

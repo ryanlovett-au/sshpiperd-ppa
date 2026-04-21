@@ -15,10 +15,15 @@
 #   GPG_KEY_ID    fingerprint of the signing subkey (long form preferred)
 #
 # Optional env:
-#   OUTDIR        default: $PWD/build
-#   UPSTREAM_REPO default: https://github.com/tg123/sshpiper.git
-#   CHANGELOG_MSG default: "Automated build for ${UPSTREAM_TAG} on ${SERIES}"
-#   NO_SIGN       if set, pass -us -uc (unsigned; for local dry-runs only)
+#   OUTDIR           default: $PWD/build
+#   UPSTREAM_REPO    default: https://github.com/tg123/sshpiper.git
+#   CHANGELOG_MSG    default: "Automated build for ${UPSTREAM_TAG} on ${SERIES}"
+#   NO_SIGN          if set, pass -us -uc (unsigned; for local dry-runs only)
+#   UPSTREAM_SUFFIX  appended to the upstream version to force a fresh set of
+#                    filename slots on Launchpad (e.g. "+p1"). Use when a prior
+#                    upload of the same upstream tag left the librarian holding
+#                    conflicting file content. Git clone still uses the raw
+#                    UPSTREAM_TAG — only the *version string* is bumped.
 
 set -euo pipefail
 
@@ -32,9 +37,15 @@ UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/tg123/sshpiper.git}"
 OUTDIR="${OUTDIR:-$PWD/build}"
 CHANGELOG_MSG="${CHANGELOG_MSG:-Automated build for ${UPSTREAM_TAG} on ${SERIES}}"
 
-# Upstream version: strip leading 'v' if present.
-UPSTREAM_VERSION="${UPSTREAM_TAG#v}"
+# Upstream version: strip leading 'v' if present. UPSTREAM_SUFFIX (optional,
+# e.g. "+p1") is appended to sidestep stuck filename slots on Launchpad; the
+# git clone below still uses the raw UPSTREAM_TAG.
+UPSTREAM_SUFFIX="${UPSTREAM_SUFFIX:-}"
+UPSTREAM_VERSION="${UPSTREAM_TAG#v}${UPSTREAM_SUFFIX}"
 DEB_VERSION="${UPSTREAM_VERSION}-0ppa${PPA_REV}~${SERIES}1"
+if [ -n "${UPSTREAM_SUFFIX}" ]; then
+    echo "==> UPSTREAM_SUFFIX='${UPSTREAM_SUFFIX}' -> package version ${UPSTREAM_VERSION}"
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$(mktemp -d -t sshpiperd-ppa.XXXXXX)"
