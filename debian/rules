@@ -16,11 +16,15 @@ export GOPROXY := off
 # is available for the target series (1.25 on resolute Release, 1.24
 # on noble-updates). build-source-package.sh already lowers upstream's
 # `go 1.25.0` directive to `go 1.24` — newer Go compiles it fine.
+#
+# We DON'T hard-error here if Go isn't found, because `dpkg-buildpackage
+# -S` runs the `clean` target on our CI runner (which has no Go
+# installed) when producing the source package. The check moves to
+# override_dh_auto_build where it actually matters.
 GO_BINDIR := $(firstword $(wildcard /usr/lib/go-1.25/bin /usr/lib/go-1.24/bin))
-ifeq ($(GO_BINDIR),)
-$(error No /usr/lib/go-{1.25,1.24}/bin found — check Build-Depends)
-endif
+ifneq ($(GO_BINDIR),)
 export PATH := $(GO_BINDIR):$(PATH)
+endif
 # Belt-and-braces: never let Go try to fetch a different toolchain.
 # Launchpad's GOPROXY=off would block it anyway, but this fails fast.
 export GOTOOLCHAIN := local
@@ -45,6 +49,10 @@ PLUGINS := $(notdir $(patsubst %/,%,$(dir $(wildcard plugin/*/main.go))))
 	dh $@ --buildsystem=golang --with=golang
 
 override_dh_auto_build:
+	@if [ -z "$(GO_BINDIR)" ]; then \
+		echo 'error: no /usr/lib/go-{1.25,1.24}/bin found — check Build-Depends' >&2; \
+		exit 1; \
+	fi
 	mkdir -p $(BINDIR) $(GOCACHE) $(GOTMPDIR) $(GOMODCACHE)
 	go build -o $(BINDIR)/sshpiperd ./cmd/sshpiperd
 	for p in $(PLUGINS); do \
