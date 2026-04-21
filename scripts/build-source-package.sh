@@ -53,6 +53,17 @@ git clone --depth 1 --branch "${UPSTREAM_TAG}" \
 SRCDIR="${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
 cd "${SRCDIR}"
 
+# Derive a deterministic timestamp from the upstream tag's commit so the
+# .orig.tar.xz is byte-identical across series and across re-runs. Launchpad
+# stores one orig per <package>_<upstream-version> and rejects uploads that
+# differ in content, so determinism here is a correctness requirement, not
+# just hygiene.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+    export SOURCE_DATE_EPOCH
+    echo "==> SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} (from upstream commit)"
+fi
+
 echo "==> Removing upstream VCS state and .github (keep submodule contents)"
 # `.git` in a submodule is a file pointing at the parent's .git/modules dir;
 # removing it detaches the submodule but leaves its files in place, which is
