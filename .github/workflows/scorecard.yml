@@ -1,0 +1,54 @@
+name: scorecard
+
+# OpenSSF Scorecard audits this repo against ~18 security-hygiene checks
+# (pinned deps, minimum token permissions, security policy, branch
+# protection, dangerous workflow patterns, etc.) and uploads a SARIF
+# report to GitHub's Security tab. Runs weekly plus on every push to
+# main so new findings surface quickly.
+#
+# Docs: https://github.com/ossf/scorecard-action
+
+on:
+  schedule:
+    # Weekly at 07:23 UTC on Sundays (off-peak, offset from other crons).
+    - cron: '23 7 * * 0'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      # `security-events: write` is required to upload SARIF to the
+      # Security tab.
+      security-events: write
+      # `id-token: write` lets Scorecard publish results to the public
+      # OpenSSF metrics dataset — harmless for a public repo, and lets
+      # us display the scorecard badge.
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Set to true to publish results to the OpenSSF public metrics
+          # dataset. Useful for the "check my score" badge on the README.
+          publish_results: true
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@65216971a11ded447a6b76263d5a144519e5eee1 # v2.25.2
+        with:
+          sarif_file: results.sarif
