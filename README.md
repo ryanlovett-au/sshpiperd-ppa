@@ -238,37 +238,164 @@ workflow.
 ## Annual rotation
 
 Rotate the signing subkey every year before its expiry. Overlap old + new
-on Launchpad so in-flight builds keep verifying:
+on Launchpad so in-flight builds keep verifying. These steps assume
+day-to-day state (master secret offline, only subkey stub in
+`$GNUPGHOME`) — we temporarily restore the master, rotate, then put it
+back offline.
 
-1. **Generate a new subkey** on the offline machine (master must be present):
-   ```bash
-   gpg --quick-add-key "$MASTER_FPR" ed25519 sign 1y
-   NEW_SUB_FPR="$(gpg --list-secret-keys --with-colons \
-                  | awk -F: '$1=="fpr"{print $10}' | tail -n1)"
-   ```
-2. **Publish the updated master** to the keyserver — Launchpad refreshes
-   from the keyserver, so the new subkey becomes acceptable automatically:
-   ```bash
-   gpg --send-keys --keyserver keyserver.ubuntu.com "$MASTER_FPR"
-   ```
-3. **Verify acceptance** by signing a test file with the new subkey and
-   uploading a no-op `.changes` or just watching Launchpad's key page
-   refresh (can take an hour).
-4. **Export the new subkey** (`--export-secret-subkeys "$NEW_SUB_FPR!"`)
-   and rotate the three GitHub secrets (`GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`,
-   `GPG_KEY_ID`).
-5. **Revoke the old subkey** once you've confirmed a real release built
-   with the new one:
-   ```bash
-   gpg --edit-key "$MASTER_FPR"
-   # key <N>   (select old subkey)
-   # revkey    (reason: "Key is no longer used")
-   # save
-   gpg --send-keys --keyserver keyserver.ubuntu.com "$MASTER_FPR"
-   ```
+### 0. Prep
 
-Calendar reminder: set for **11 months** after generation, not 12 — gives
-a month of slack if rotation day is busy.
+Paste the whole block:
+
+```bash
+# --- Current key fingerprints. Update these after each rotation. ---
+export MASTER_FPR="F0F47345BB20C959ADE80A6BEBC9CDD7891B6F4B"
+export OLD_SUB_FPR="94AF6A33B9F78505F0B3658E8A48FF9288F19EBC"
+# ------------------------------------------------------------------
+
+export GNUPGHOME="$HOME/.gnupg-sshpiperd-ppa"
+export GPG_TTY="$(tty)"    # avoids "Inappropriate ioctl for device" from pinentry
+```
+
+Retrieve `master.secret.asc` and `master.public.asc` from your offline
+storage and copy them into `$GNUPGHOME` (or a scratch dir; the commands
+below assume `$GNUPGHOME`). Then import the master secret:
+
+```bash
+gpg --import "$GNUPGHOME/master.secret.asc"
+gpg -K --with-subkey-fingerprints   # should now show `sec` (not `sec#`)
+```
+
+### 1. Generate a new signing subkey (1-year expiry)
+
+```bash
+gpg --quick-add-key "$MASTER_FPR" ed25519 sign 1y
+NEW_SUB_FPR="$(gpg --list-secret-keys --with-colons "$MASTER_FPR" \
+               | awk -F: '$1=="fpr"{print $10}' | tail -n1)"
+echo "New subkey: $NEW_SUB_FPR"
+```
+
+gpg reuses the master's passphrase for the new subkey by default, so
+you typically don't need to pick a new passphrase (and therefore don't
+need to update `GPG_PASSPHRASE` in the GitHub Environment).
+
+### 2. Publish the updated master to the keyserver
+
+Note the `hkps://` prefix — the default HKP port (11371) is blocked on
+many networks; HKP-over-TLS on 443 almost always gets through.
+`$GNUPGHOME/dirmngr.conf` already has `disable-ipv6` from initial
+bootstrap, which matters if your network has no working v6 route.
+
+```bash
+gpg --send-keys --keyserver hkps://keyserver.ubuntu.com "$MASTER_FPR"
+```
+
+Launchpad refreshes from the keyserver pool on its own cycle (usually
+within minutes to an hour); the new subkey becomes acceptable
+automatically — no Launchpad UI action needed.
+
+### 3. Export the new subkey
+
+```bash
+gpg --armor --export-secret-subkeys "${NEW_SUB_FPR}!" \
+    > "$GNUPGHOME/subkey.secret.asc"
+# Verify the master entry is a stub, not real secret material:
+gpg --list-packets "$GNUPGHOME/subkey.secret.asc" \
+    | grep -E 'gnu-dummy|secret (sub )?key packet' | head
+# Expect one "gnu-dummy" (the master stub) and one "secret sub key packet".
+```
+
+### 4. Rotate the GitHub Environment secrets
+
+Only `GPG_KEY_ID` and `GPG_PRIVATE_KEY` change. `GPG_PASSPHRASE` stays
+unless you deliberately set a new one in step 1.
+
+```bash
+printf '%s' "$NEW_SUB_FPR" \
+  | gh secret set GPG_KEY_ID --env ppa-release --repo ryanlovett-au/sshpiperd-ppa
+
+gh secret set GPG_PRIVATE_KEY --env ppa-release --repo ryanlovett-au/sshpiperd-ppa \
+  < "$GNUPGHOME/subkey.secret.asc"
+```
+
+### 5. Verify end-to-end
+
+Trigger a manual release against the current upstream tag to prove the
+new key signs successfully and Launchpad accepts it. Use a `+rot1`
+suffix so you get a fresh filename slot that doesn't collide with an
+already-published source for the same upstream version:
+
+```bash
+# Get the current upstream tag to target (or substitute a known one).
+TAG=$(gh api /repos/tg123/sshpiper/releases/latest --jq .tag_name)
+
+gh workflow run ppa-release.yml \
+    --repo ryanlovett-au/sshpiperd-ppa \
+    --ref main \
+    --field upstream_tag="$TAG" \
+    --field upstream_suffix=+rot1 \
+    --field series=noble,resolute
+```
+
+Also delete the existing `built/noble/$TAG` and `built/resolute/$TAG`
+marker tags first if they're present — otherwise `detect` will skip:
+
+```bash
+for s in noble resolute; do
+  gh api --method DELETE \
+    "/repos/ryanlovett-au/sshpiperd-ppa/git/refs/tags/built/${s}/${TAG}" \
+    2>/dev/null || true
+done
+```
+
+A clean run — Launchpad accepts both uploads and builds succeed — means
+the rotation is live.
+
+### 6. Revoke the old subkey
+
+Only after step 5 confirms the new key works:
+
+```bash
+gpg --edit-key "$MASTER_FPR"
+# At the prompt:
+#   key <N>    (select the old subkey — numbered from 1 in the listing)
+#   revkey     (reason: "Key is no longer used")
+#   save
+gpg --send-keys --keyserver hkps://keyserver.ubuntu.com "$MASTER_FPR"
+```
+
+### 7. Re-offline the master
+
+Restore day-to-day state: master secret removed locally, only the subkey
+stub + new subkey secret in `$GNUPGHOME`.
+
+```bash
+# Re-export the new subkey fresh (so the stub reflects the revoked-old +
+# live-new state post step 6).
+gpg --armor --export-secret-subkeys "${NEW_SUB_FPR}!" \
+    > "$GNUPGHOME/subkey.secret.asc"
+
+# Wipe all secret material for the identity, then re-import only the
+# subkey export. The public keyring is untouched.
+gpg --delete-secret-keys "$MASTER_FPR"
+gpg --import "$GNUPGHOME/subkey.secret.asc"
+gpg -K --with-subkey-fingerprints   # master should show `sec#` again
+
+# Scrub the restored master secret from disk. (Offline backup in your
+# password manager / USB / safe is the canonical copy.)
+rm -P "$GNUPGHOME/master.secret.asc"
+rm -P "$GNUPGHOME/subkey.secret.asc"
+```
+
+### 8. Update `keys_sshpiperd_ppa.md`
+
+Record the new subkey fingerprint + expiry date in the memory file so
+next-year-you and any future Claude session picks up the new value.
+
+### Calendar reminder
+
+Set for **11 months** after each generation, not 12 — gives you a month
+of slack if rotation day is busy.
 
 ## Incident response: suspected key compromise
 
