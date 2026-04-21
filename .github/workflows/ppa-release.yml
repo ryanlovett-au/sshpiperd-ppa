@@ -113,9 +113,11 @@ jobs:
           fi
           echo "To build: ${SERIES_JSON}"
 
-          echo "tag=${TAG}"                 >> "$GITHUB_OUTPUT"
-          echo "series=${SERIES_JSON}"      >> "$GITHUB_OUTPUT"
-          echo "should_build=${SHOULD}"     >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=${TAG}"
+            echo "series=${SERIES_JSON}"
+            echo "should_build=${SHOULD}"
+          } >> "$GITHUB_OUTPUT"
 
   build-and-upload:
     name: Build & upload (${{ matrix.series }})
@@ -254,7 +256,17 @@ jobs:
           # Poll until we see it or we time out (→ treat as rejected and
           # fail the job so the marker-tag step doesn't fire).
 
-          CHANGES=$(ls build/sshpiperd_*_source.changes | head -1)
+          # Glob-expand to an array, then grab the first (and only) entry.
+          # Using ls+head would trip shellcheck SC2012 and mishandle exotic
+          # filenames — not a real risk for our filename pattern, but the
+          # array form is just as short and tools don't complain.
+          shopt -s nullglob
+          changes=( build/sshpiperd_*_source.changes )
+          if [ ${#changes[@]} -eq 0 ]; then
+            echo "::error::No .changes file found in build/" >&2
+            exit 1
+          fi
+          CHANGES="${changes[0]}"
           VERSION=$(awk '/^Version:/{print $2; exit}' "$CHANGES")
           echo "Checking Launchpad for sshpiperd ${VERSION} in ${SERIES}..."
 
