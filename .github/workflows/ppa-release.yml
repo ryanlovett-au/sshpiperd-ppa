@@ -29,9 +29,9 @@ on:
         required: false
         default: ''
       series:
-        description: 'Comma-separated Ubuntu series (e.g. noble,jammy).'
+        description: 'Comma-separated Ubuntu series (e.g. noble,resolute).'
         required: false
-        default: 'noble'
+        default: 'noble,resolute'
 
 # No permissions by default — each job opts in to what it needs.
 permissions: {}
@@ -79,7 +79,9 @@ jobs:
 
           # Split input "noble,resolute" (or just "noble") into an array,
           # trimming whitespace. Empty string -> empty array.
-          SERIES="${MANUAL_SERIES:-noble}"
+          # Bash fallback (for cron, where inputs are empty) must match the
+          # workflow_dispatch default above.
+          SERIES="${MANUAL_SERIES:-noble,resolute}"
           IFS=',' read -ra REQUESTED <<< "${SERIES}"
 
           # Filter to only series that don't yet have a built/<series>/<tag>
