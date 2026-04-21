@@ -227,6 +227,51 @@ jobs:
           EOF
           dput ryanlovett-sshpiperd build/sshpiperd_*_source.changes
 
+      - name: Wait for Launchpad to accept the source
+        env:
+          SERIES: ${{ matrix.series }}
+        run: |
+          set -euo pipefail
+
+          # dput just uploads over FTP — Launchpad runs async validation
+          # afterwards. An accepted source appears in getPublishedSources;
+          # a rejected one never does (rejection comes via email only).
+          # Poll until we see it or we time out (→ treat as rejected and
+          # fail the job so the marker-tag step doesn't fire).
+
+          CHANGES=$(ls build/sshpiperd_*_source.changes | head -1)
+          VERSION=$(awk '/^Version:/{print $2; exit}' "$CHANGES")
+          echo "Checking Launchpad for sshpiperd ${VERSION} in ${SERIES}..."
+
+          API='https://api.launchpad.net/1.0/~ryanlovett/+archive/ubuntu/sshpiperd'
+          DISTRO="https://api.launchpad.net/1.0/ubuntu/${SERIES}"
+
+          deadline=$(( $(date +%s) + 900 ))  # 15 min total
+          delay=15
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            # getPublishedSources returns rows in ALL states (Deleted,
+            # Superseded, Obsolete too), so filter client-side to the
+            # "actually live" statuses.
+            active=$(curl -sfL --max-time 20 -G "$API" \
+                      --data-urlencode "ws.op=getPublishedSources" \
+                      --data-urlencode "source_name=sshpiperd" \
+                      --data-urlencode "version=${VERSION}" \
+                      --data-urlencode "exact_match=true" \
+                      --data-urlencode "distro_series=${DISTRO}" \
+                    | jq -r '[.entries[]?
+                              | select(.status == "Pending" or .status == "Published")
+                             ] | length')
+            if [ "${active:-0}" -gt 0 ]; then
+              echo "Launchpad accepted ${VERSION} for ${SERIES}."
+              exit 0
+            fi
+            echo "Not yet visible — sleeping ${delay}s"
+            sleep "${delay}"
+          done
+
+          echo "::error::Launchpad did not publish sshpiperd ${VERSION} for ${SERIES} within the timeout. This usually means the upload was rejected — check the Launchpad email for details. No marker tag will be created, so the workflow can retry once the cause is fixed."
+          exit 1
+
       - name: Record successful upload as a marker tag
         env:
           UPSTREAM_TAG: ${{ needs.detect.outputs.tag }}
