@@ -10,6 +10,15 @@ export GOPROXY := off
 BUILDDIR := $(CURDIR)/_build
 BINDIR   := $(BUILDDIR)/bin
 
+# Launchpad's sbuild sets HOME=/sbuild-nonexistent (a read-only canary
+# path) to catch packages that try to write to $HOME during build. Go's
+# defaults for GOCACHE / GOTMPDIR / GOMODCACHE are all under $HOME, so
+# without overrides `go build` fails with "permission denied" on first
+# invocation. Keep everything inside the build tree.
+export GOCACHE := $(BUILDDIR)/.gocache
+export GOTMPDIR := $(BUILDDIR)/.gotmp
+export GOMODCACHE := $(BUILDDIR)/.gomodcache
+
 # Plugins discovered at build time from plugin/*/main.go.
 # Tweak this list if upstream layout changes.
 PLUGINS := $(notdir $(patsubst %/,%,$(dir $(wildcard plugin/*/main.go))))
@@ -18,7 +27,7 @@ PLUGINS := $(notdir $(patsubst %/,%,$(dir $(wildcard plugin/*/main.go))))
 	dh $@ --buildsystem=golang --with=golang
 
 override_dh_auto_build:
-	mkdir -p $(BINDIR)
+	mkdir -p $(BINDIR) $(GOCACHE) $(GOTMPDIR) $(GOMODCACHE)
 	go build -o $(BINDIR)/sshpiperd ./cmd/sshpiperd
 	for p in $(PLUGINS); do \
 	  go build -o $(BINDIR)/sshpiperd-plugin-$$p ./plugin/$$p || exit 1; \
