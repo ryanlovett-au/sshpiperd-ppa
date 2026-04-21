@@ -211,10 +211,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="built/${SERIES}/${UPSTREAM_TAG}"
-          git -c user.name='sshpiperd-ppa-bot' \
-              -c user.email='ryan@pixelated.cloud' \
-              tag -a "${TAG}" -m "Uploaded ${UPSTREAM_TAG} for ${SERIES} to PPA"
-          git push origin "${TAG}"
+          # Create a lightweight tag via the GitHub API — avoids needing
+          # persisted git credentials in the workspace for a push.
+          gh api --method POST \
+            "/repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${TAG}" \
+            -f "sha=${GITHUB_SHA}"
 
       - name: Scrub GPG material
         if: always()
