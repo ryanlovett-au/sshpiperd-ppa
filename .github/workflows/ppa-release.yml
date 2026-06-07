@@ -64,8 +64,9 @@ jobs:
       - name: Resolve target tag + series
         id: resolve
         env:
-          MANUAL_TAG: ${{ inputs.upstream_tag }}
+          MANUAL_TAG:    ${{ inputs.upstream_tag }}
           MANUAL_SERIES: ${{ inputs.series }}
+          MANUAL_SUFFIX: ${{ inputs.upstream_suffix }}
         run: |
           set -euo pipefail
           if [ -n "${MANUAL_TAG}" ]; then
@@ -91,11 +92,25 @@ jobs:
           # Filter to only series that don't yet have a built/<series>/<tag>
           # marker — avoids re-uploading to Launchpad (which would reject as
           # duplicate) and skips work on the matrix leg too.
+          #
+          # Exception: when upstream_suffix is set, the user is explicitly
+          # asking for a rebuild (typically to grab a fresh Launchpad
+          # filename slot after a failed first attempt left it stuck).
+          # Bypass the gate for *all* requested series in that case — if
+          # you only want one series rebuilt, narrow the `series` input.
+          # The marker-tag write step is idempotent (see below), so any
+          # existing markers stay put. This preserves cron's dedup
+          # semantics: a bare built/<series>/<TAG> marker means "this
+          # upstream tag has been processed for this series, somehow",
+          # regardless of which suffix actually landed on Launchpad.
           TO_BUILD=()
           for raw in "${REQUESTED[@]}"; do
             s="${raw// /}"  # strip spaces
             [ -z "$s" ] && continue
-            if git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
+            if [ -n "${MANUAL_SUFFIX}" ]; then
+              echo "Forcing rebuild of ${s}: suffix '${MANUAL_SUFFIX}' provided"
+              TO_BUILD+=("${s}")
+            elif git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
               echo "Skipping ${s}: already built for ${TAG}"
             else
               TO_BUILD+=("${s}")
@@ -307,12 +322,23 @@ jobs:
         run: |
           set -euo pipefail
           TAG="built/${SERIES}/${UPSTREAM_TAG}"
-          # Create a lightweight tag via the GitHub API — avoids needing
-          # persisted git credentials in the workspace for a push.
-          gh api --method POST \
-            "/repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/tags/${TAG}" \
-            -f "sha=${GITHUB_SHA}"
+          # The marker is intentionally suffix-free — its job is to tell
+          # the daily cron "this upstream tag has been processed for this
+          # series". A suffixed rerun (e.g. +p2) succeeding on top of an
+          # already-marked tag must NOT overwrite the existing marker,
+          # and the POST below would 422 if we tried. Probe the ref first
+          # and skip the write when it already exists.
+          if gh api "/repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
+                --silent >/dev/null 2>&1; then
+            echo "Marker ${TAG} already exists — leaving in place"
+          else
+            # Create a lightweight tag via the GitHub API — avoids needing
+            # persisted git credentials in the workspace for a push.
+            gh api --method POST \
+              "/repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${TAG}" \
+              -f "sha=${GITHUB_SHA}"
+          fi
 
       - name: Scrub GPG material
         if: always()
