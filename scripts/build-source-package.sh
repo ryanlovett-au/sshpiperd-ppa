@@ -113,30 +113,36 @@ go mod vendor
 echo "==> Stripping toolchain directive from go.mod"
 # Launchpad builders have no network during build (GOPROXY=off), so a
 # `toolchain` directive's auto-download would fail. Safe to strip on every
-# series: the installed Go (1.24 on noble/jammy, 1.25 on resolute) is
-# already what we want to use.
+# series: the installed Go is already what we want to use.
 sed -i '/^toolchain /d' go.mod
 
+# Cap go directives to the newest Go available on each target series.
+# Upstream's go.mod and some vendored deps' go.mod (recorded as
+# `## explicit; go X.Y` in vendor/modules.txt) keep marching forward
+# (1.25, 1.26, …); each series gets stuck on whatever Go landed in
+# main+updates by release time. Go's vendor mode enforces *every*
+# vendored module's directive, so both files must be capped together.
+# If upstream ever uses a genuine language feature newer than the cap,
+# the Launchpad build will surface it as a real compile error.
+#
+# Update this table when a new series is added or when one gets a Go
+# point-release bump that lets us raise the cap. Leave the default arm
+# empty for series newer than anything we've seen, on the assumption
+# that they ship a Go new enough for upstream's current directive.
 case "${SERIES}" in
-    noble|jammy|focal)
-        echo "==> ${SERIES} lacks Go 1.25 — capping go directives to 1.24"
-        # Noble/jammy/focal top out at Go 1.24, but upstream declares
-        # `go 1.25.0` in go.mod and some vendored deps (e.g.
-        # github.com/pires/go-proxyproto in v1.5.4) declare `go 1.25` in
-        # their own go.mod, recorded as `## explicit; go 1.25` lines in
-        # vendor/modules.txt. Go's vendor mode enforces *every* vendored
-        # module's directive, so both must be lowered for Go 1.24 to
-        # accept the build. If upstream ever uses a genuine 1.25-only
-        # language feature, the Launchpad build will surface it as a
-        # real compile error.
-        sed -i -E 's/^go [0-9]+\.[0-9]+(\.[0-9]+)?$/go 1.24/' go.mod
-        sed -i -E 's/^(## (.*; )?go )[0-9]+\.[0-9]+(\.[0-9]+)?$/\11.24/' \
-            vendor/modules.txt
-        ;;
-    *)
-        echo "==> ${SERIES} has Go 1.25 — leaving go directives as upstream declares"
-        ;;
+    focal|jammy|noble) GO_CAP=1.24 ;;
+    resolute)          GO_CAP=1.25 ;;
+    *)                 GO_CAP=    ;;
 esac
+
+if [ -n "${GO_CAP}" ]; then
+    echo "==> Capping go directives to ${GO_CAP} for ${SERIES}"
+    sed -i -E "s/^go [0-9]+\\.[0-9]+(\\.[0-9]+)?\$/go ${GO_CAP}/" go.mod
+    sed -i -E "s/^(## (.*; )?go )[0-9]+\\.[0-9]+(\\.[0-9]+)?\$/\\1${GO_CAP}/" \
+        vendor/modules.txt
+else
+    echo "==> ${SERIES}: no cap configured — leaving go directives as upstream declares"
+fi
 
 echo "==> Overlaying debian/ tree from ${REPO_ROOT}"
 cp -a "${REPO_ROOT}/debian" ./debian
