@@ -19,11 +19,15 @@
 #   UPSTREAM_REPO    default: https://github.com/tg123/sshpiper.git
 #   CHANGELOG_MSG    default: "Automated build for ${UPSTREAM_TAG} on ${SERIES}"
 #   NO_SIGN          if set, pass -us -uc (unsigned; for local dry-runs only)
-#   UPSTREAM_SUFFIX  appended to the upstream version to force a fresh set of
-#                    filename slots on Launchpad (e.g. "+p1"). Use when a prior
-#                    upload of the same upstream tag left the librarian holding
-#                    conflicting file content. Git clone still uses the raw
-#                    UPSTREAM_TAG — only the *version string* is bumped.
+#   UPSTREAM_SUFFIX  appended to the upstream version. Defaults to "+${SERIES}"
+#                    so every series gets its own orig-tarball filename slot on
+#                    Launchpad — necessary because the per-series steps below
+#                    (dropping plugin/kubernetes, capping go directives) make
+#                    the orig content diverge across series, and Launchpad
+#                    stores only one orig per <package>_<upstream-version>.
+#                    Override to a fixed string (e.g. "+p1") to force a fresh
+#                    slot when re-uploading after a mistake. Git clone still
+#                    uses the raw UPSTREAM_TAG — only the version string moves.
 
 set -euo pipefail
 
@@ -37,15 +41,14 @@ UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/tg123/sshpiper.git}"
 OUTDIR="${OUTDIR:-$PWD/build}"
 CHANGELOG_MSG="${CHANGELOG_MSG:-Automated build for ${UPSTREAM_TAG} on ${SERIES}}"
 
-# Upstream version: strip leading 'v' if present. UPSTREAM_SUFFIX (optional,
-# e.g. "+p1") is appended to sidestep stuck filename slots on Launchpad; the
-# git clone below still uses the raw UPSTREAM_TAG.
-UPSTREAM_SUFFIX="${UPSTREAM_SUFFIX:-}"
+# Upstream version: strip leading 'v' if present, then append UPSTREAM_SUFFIX.
+# Default suffix is "+${SERIES}" so each Ubuntu series owns its own orig
+# filename slot on Launchpad — required because the per-series steps below
+# make orig content diverge across series. Git clone still uses raw UPSTREAM_TAG.
+UPSTREAM_SUFFIX="${UPSTREAM_SUFFIX:-+${SERIES}}"
 UPSTREAM_VERSION="${UPSTREAM_TAG#v}${UPSTREAM_SUFFIX}"
 DEB_VERSION="${UPSTREAM_VERSION}-0ppa${PPA_REV}~${SERIES}1"
-if [ -n "${UPSTREAM_SUFFIX}" ]; then
-    echo "==> UPSTREAM_SUFFIX='${UPSTREAM_SUFFIX}' -> package version ${UPSTREAM_VERSION}"
-fi
+echo "==> UPSTREAM_SUFFIX='${UPSTREAM_SUFFIX}' -> package version ${UPSTREAM_VERSION}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$(mktemp -d -t sshpiperd-ppa.XXXXXX)"
@@ -64,11 +67,12 @@ git clone --depth 1 --branch "${UPSTREAM_TAG}" \
 SRCDIR="${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
 cd "${SRCDIR}"
 
-# Derive a deterministic timestamp from the upstream tag's commit so the
-# .orig.tar.xz is byte-identical across series and across re-runs. Launchpad
-# stores one orig per <package>_<upstream-version> and rejects uploads that
-# differ in content, so determinism here is a correctness requirement, not
-# just hygiene.
+# Derive a deterministic timestamp from the upstream tag's commit so re-runs
+# of the same series produce a byte-identical .orig.tar.xz. Launchpad stores
+# one orig per <package>_<upstream-version> and rejects uploads that differ
+# in content; each series has its own upstream-version now (see UPSTREAM_SUFFIX
+# default above), so cross-series identity isn't required — but per-series
+# reproducibility still is, so any re-upload after a partial failure matches.
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
     export SOURCE_DATE_EPOCH
