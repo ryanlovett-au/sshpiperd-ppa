@@ -148,6 +148,28 @@ else
     echo "==> ${SERIES}: no cap configured — leaving go directives as upstream declares"
 fi
 
+# As of upstream v1.6.1, cmd/sshpiperd is its own nested Go module with a
+# `replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto ...` for the
+# sshpiper-forked SSH library. It needs its own vendor tree, and its go.mod
+# (and vendor/modules.txt) need the same toolchain-strip + go-directive cap
+# treatment as the root module. Guarded so older tags (single-module layout)
+# still build unchanged.
+if [ -f cmd/sshpiperd/go.mod ]; then
+    echo "==> cmd/sshpiperd is a nested module — vendoring it too"
+    (cd cmd/sshpiperd && go mod vendor)
+
+    echo "==> Stripping toolchain directive from cmd/sshpiperd/go.mod"
+    sed -i '/^toolchain /d' cmd/sshpiperd/go.mod
+
+    if [ -n "${GO_CAP}" ]; then
+        echo "==> Capping cmd/sshpiperd go directives to ${GO_CAP}"
+        sed -i -E "s/^go [0-9]+\\.[0-9]+(\\.[0-9]+)?\$/go ${GO_CAP}/" \
+            cmd/sshpiperd/go.mod
+        sed -i -E "s/^(## (.*; )?go )[0-9]+\\.[0-9]+(\\.[0-9]+)?\$/\\1${GO_CAP}/" \
+            cmd/sshpiperd/vendor/modules.txt
+    fi
+fi
+
 echo "==> Overlaying debian/ tree from ${REPO_ROOT}"
 cp -a "${REPO_ROOT}/debian" ./debian
 # Ensure executable bits on maintainer scripts + rules (tar preserves, but be safe).

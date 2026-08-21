@@ -54,7 +54,13 @@ override_dh_auto_build:
 		exit 1; \
 	fi
 	mkdir -p $(BINDIR) $(GOCACHE) $(GOTMPDIR) $(GOMODCACHE)
-	go build -o $(BINDIR)/sshpiperd ./cmd/sshpiperd
+	# cmd/sshpiperd is a nested Go module (upstream v1.6.1+) with its own
+	# go.mod, vendor/, and a `replace golang.org/x/crypto => ...` pointing
+	# at the sshpiper-forked SSH library. Must be built from inside its own
+	# module root — `go build ./cmd/sshpiperd` from the parent errors with
+	# "main module does not contain package". Plugins remain part of the
+	# parent module and build from $(CURDIR).
+	(cd cmd/sshpiperd && go build -o $(BINDIR)/sshpiperd .)
 	for p in $(PLUGINS); do \
 	  go build -o $(BINDIR)/sshpiperd-plugin-$$p ./plugin/$$p || exit 1; \
 	done
