@@ -148,6 +148,78 @@ else
     echo "==> ${SERIES}: no cap configured — leaving go directives as upstream declares"
 fi
 
+# Upstream v1.6.1 calls *os.Root.MkdirAll (Go 1.25, added Aug 2025) at
+# cmd/sshpiperd/daemon.go:476. Noble/jammy ship Go 1.24, whose stdlib
+# doesn't have that method — the go-directive cap only caps language level,
+# not stdlib surface. Rather than drop older series (Ryan wants all three
+# LTS+STS supported), inject a small backport that walks the path with
+# Mkdir + OpenRoot (both Go 1.24 stdlib when *os.Root was introduced), which
+# preserves the exact symlink-containment guarantee upstream deliberately
+# relies on. Shim is universal — works on Go 1.24 AND 1.25 — so applied
+# unconditionally, no series-specific branching.
+#
+# When bumping to a new upstream tag, re-audit for new Go 1.25+ patterns:
+#     grep -rnE '\.(MkdirAll|Chmod|Chown|Chtimes|Symlink|Readlink|Lchown|Chdir)\(' cmd/sshpiperd/
+#     grep -rnE '(os\.CopyFS|slog\.DiscardHandler)' cmd/sshpiperd/
+if [ -f cmd/sshpiperd/daemon.go ] && grep -q 'd\.recordRoot\.MkdirAll' cmd/sshpiperd/daemon.go; then
+    echo "==> Injecting *os.Root.MkdirAll backport shim into cmd/sshpiperd/"
+    cat >cmd/sshpiperd/os_root_backport.go <<'EOF'
+// Injected by ryanlovett/sshpiperd-ppa build script.
+// Backport of *os.Root.MkdirAll (added in Go 1.25). Walks path components
+// with Mkdir + OpenRoot (both Go 1.24 stdlib when *os.Root was introduced),
+// preserving the symlink-containment guarantee upstream relies on.
+// Universal: works on Go 1.24 AND 1.25 — no build tag needed.
+package main
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func mkdirAllRoot(root *os.Root, path string, perm os.FileMode) error {
+	cur := root
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if err := cur.Mkdir(part, perm); err != nil && !errors.Is(err, os.ErrExist) {
+			if cur != root {
+				_ = cur.Close()
+			}
+			return err
+		}
+		next, err := cur.OpenRoot(part)
+		if err != nil {
+			if cur != root {
+				_ = cur.Close()
+			}
+			return err
+		}
+		if cur != root {
+			_ = cur.Close()
+		}
+		cur = next
+	}
+	if cur != root {
+		_ = cur.Close()
+	}
+	return nil
+}
+EOF
+    sed -i 's|d\.recordRoot\.MkdirAll(subdir, 0o700)|mkdirAllRoot(d.recordRoot, subdir, 0o700)|' \
+        cmd/sshpiperd/daemon.go
+    # Fail fast if upstream changed the call site (different args/var name):
+    # the grep guard above would still match but the sed wouldn't take, and
+    # the build would only die later on Launchpad with the original
+    # "MkdirAll undefined" error. Better to stop here in the runner.
+    if grep -q 'recordRoot\.MkdirAll' cmd/sshpiperd/daemon.go; then
+        echo "error: MkdirAll call site changed upstream — shim sed did not apply; update the shim" >&2
+        exit 1
+    fi
+fi
+
 # As of upstream v1.6.1, cmd/sshpiperd is its own nested Go module with a
 # `replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto ...` for the
 # sshpiper-forked SSH library. It needs its own vendor tree, and its go.mod
