@@ -265,11 +265,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # dput just uploads over FTP — Launchpad runs async validation
-          # afterwards. An accepted source appears in getPublishedSources;
-          # a rejected one never does (rejection comes via email only).
-          # Poll until we see it or we time out (→ treat as rejected and
-          # fail the job so the marker-tag step doesn't fire).
+          # dput just uploads over FTP — Launchpad validates asynchronously.
+          # Watch TWO signals; either proves the upload was accepted:
+          #   1. Build records (getBuildRecords): appear within seconds of
+          #      acceptance, well before any publishing row exists.
+          #   2. The source publishing row (getPublishedSources): the
+          #      authoritative record, but it lags a publisher cycle —
+          #      observed 15+ min behind on 2026-08-31, where the builds
+          #      FINISHED before the row was visible and the old
+          #      single-signal poll timed out on a successful upload.
+          # A rejected upload produces neither (rejection is email-only),
+          # so timing out still fails the job and skips the marker tag.
+          #
+          # Transient API hiccups must not kill the poll: curl gets --retry,
+          # and each query falls back to 0 via `|| echo 0` — under pipefail
+          # a single curl timeout aborted the whole step (exit 28 on
+          # 2026-09-02, 20s into the poll).
 
           # Glob-expand to an array, then grab the first (and only) entry.
           # Using ls+head would trip shellcheck SC2012 and mishandle exotic
@@ -287,14 +298,32 @@ jobs:
 
           API='https://api.launchpad.net/1.0/~ryanlovett/+archive/ubuntu/sshpiperd'
           DISTRO="https://api.launchpad.net/1.0/ubuntu/${SERIES}"
+          CURL=(curl -sfL --max-time 30 --retry 3 -G)
 
-          deadline=$(( $(date +%s) + 900 ))  # 15 min total
+          deadline=$(( $(date +%s) + 1800 ))  # 30 min total
           delay=15
           while [ "$(date +%s)" -lt "$deadline" ]; do
-            # getPublishedSources returns rows in ALL states (Deleted,
-            # Superseded, Obsolete too), so filter client-side to the
-            # "actually live" statuses.
-            active=$(curl -sfL --max-time 20 -G "$API" \
+            # Signal 1: a build record whose title names our exact version
+            # and series (e.g. "amd64 build of sshpiperd 1.6.1+p2-0ppa1~noble1
+            # in ubuntu noble RELEASE"). Newest-first, so page one suffices.
+            builds=$("${CURL[@]}" "$API" \
+                      --data-urlencode "ws.op=getBuildRecords" \
+                      --data-urlencode "source_name=sshpiperd" \
+                    | jq -r --arg v "${VERSION}" --arg s "${SERIES}" \
+                        '[.entries[]?
+                          | select(.title | contains(" \($v) in ubuntu \($s) "))
+                         ] | length' \
+                    || echo 0)
+            [[ "${builds}" =~ ^[0-9]+$ ]] || builds=0
+            if [ "${builds}" -gt 0 ]; then
+              echo "Launchpad accepted ${VERSION} for ${SERIES} (${builds} build record(s) exist)."
+              exit 0
+            fi
+
+            # Signal 2: the publishing row. getPublishedSources returns rows
+            # in ALL states (Deleted, Superseded, Obsolete too), so filter
+            # client-side to the "actually live" statuses.
+            active=$("${CURL[@]}" "$API" \
                       --data-urlencode "ws.op=getPublishedSources" \
                       --data-urlencode "source_name=sshpiperd" \
                       --data-urlencode "version=${VERSION}" \
@@ -302,11 +331,14 @@ jobs:
                       --data-urlencode "distro_series=${DISTRO}" \
                     | jq -r '[.entries[]?
                               | select(.status == "Pending" or .status == "Published")
-                             ] | length')
-            if [ "${active:-0}" -gt 0 ]; then
-              echo "Launchpad accepted ${VERSION} for ${SERIES}."
+                             ] | length' \
+                    || echo 0)
+            [[ "${active}" =~ ^[0-9]+$ ]] || active=0
+            if [ "${active}" -gt 0 ]; then
+              echo "Launchpad accepted ${VERSION} for ${SERIES} (publishing record visible)."
               exit 0
             fi
+
             echo "Not yet visible — sleeping ${delay}s"
             sleep "${delay}"
           done
