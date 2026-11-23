@@ -68,6 +68,9 @@ jobs:
           MANUAL_TAG:    ${{ inputs.upstream_tag }}
           MANUAL_SERIES: ${{ inputs.series }}
           MANUAL_REBUILD: ${{ inputs.rebuild }}
+          # Read-only job token (contents: read), used only to authenticate
+          # the upstream release lookup below.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if ! [[ "${MANUAL_REBUILD}" =~ ^[0-9]*$ ]]; then
@@ -77,9 +80,12 @@ jobs:
           if [ -n "${MANUAL_TAG}" ]; then
             TAG="${MANUAL_TAG}"
           else
-            # Latest non-prerelease upstream tag. Use the GitHub API with no
-            # auth (public repo, 60 req/hr/IP is plenty for a daily poll).
-            TAG="$(curl -fsSL \
+            # Latest non-prerelease upstream tag. The request is
+            # authenticated with the job token: anonymous calls share a
+            # 60 req/hr limit with everything else behind the runner's IP,
+            # and the 2026-11-22 scheduled run failed here with HTTP 403.
+            TAG="$(curl -fsSL --retry 3 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
               -H 'Accept: application/vnd.github+json' \
               -H 'X-GitHub-Api-Version: 2022-11-28' \
               https://api.github.com/repos/tg123/sshpiper/releases/latest \
