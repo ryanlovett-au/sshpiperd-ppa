@@ -331,9 +331,22 @@ jobs:
 
           API='https://api.launchpad.net/1.0/~ryanlovett/+archive/ubuntu/sshpiperd'
           DISTRO="https://api.launchpad.net/1.0/ubuntu/${SERIES}"
-          CURL=(curl -sfL --max-time 30 --retry 3 -G)
+          # Launchpad serves anonymous API GETs through a squid cache that
+          # keeps a response for up to 30 minutes. The first poll runs
+          # seconds after dput, before Launchpad has processed the upload,
+          # so without `Cache-Control: no-cache` every later poll is handed
+          # that same "nothing here" answer until the entry expires. On
+          # 2026-11-23 all three series polled ~110 times over 30 minutes
+          # against build records that had existed since minute one (the
+          # builds had FINISHED by minute ten); jammy and resolute passed
+          # on their last poll and noble timed out on an accepted upload.
+          # The header makes squid fetch a fresh response every time.
+          CURL=(curl -sfL --max-time 30 --retry 3 -H 'Cache-Control: no-cache' -G)
 
-          deadline=$(( $(date +%s) + 1800 ))  # 30 min total
+          # 45 min: comfortably longer than the cache lifetime, so that if
+          # the header ever stops being honoured a stale entry still
+          # expires inside the window instead of exactly at its end.
+          deadline=$(( $(date +%s) + 2700 ))
           delay=15
           while [ "$(date +%s)" -lt "$deadline" ]; do
             # Signal 1: a build record whose title names our exact version
