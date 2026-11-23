@@ -1,36 +1,41 @@
 #!/usr/bin/make -f
 
 export DH_VERBOSE = 1
-export DH_GOPKG := github.com/tg123/sshpiper
-# `full` build tag includes the optional upstream plugins
-# (docker/failtoban/fixed/lua/metrics/simplemath/username-router/yaml).
-# Without it, those plugins' main.go is gated off by `//go:build full || e2e`
-# and `go build` fails with "build constraints exclude all Go files".
-# Harmless on cmd/sshpiperd which doesn't use the `full` tag.
-export GOFLAGS := -mod=vendor -trimpath -tags=full
-export GO111MODULE := on
-# Launchpad builders have no network; vendored deps only.
-export GOPROXY := off
-# Pick the highest Go actually installed in the chroot. Build-Depends
-# lists golang-1.25-go | golang-1.24-go, so apt resolves to whichever
-# is available for the target series (1.25 on resolute Release, 1.24
-# on noble-updates). build-source-package.sh already lowers upstream's
-# `go 1.25.0` directive to `go 1.24` — newer Go compiles it fine.
-#
-# We DON'T hard-error here if Go isn't found, because `dpkg-buildpackage
-# -S` runs the `clean` target on our CI runner (which has no Go
-# installed) when producing the source package. The check moves to
-# override_dh_auto_build where it actually matters.
-GO_BINDIR := $(firstword $(wildcard /usr/lib/go-1.25/bin /usr/lib/go-1.24/bin))
-ifneq ($(GO_BINDIR),)
-export PATH := $(GO_BINDIR):$(PATH)
-endif
-# Belt-and-braces: never let Go try to fetch a different toolchain.
-# Launchpad's GOPROXY=off would block it anyway, but this fails fast.
-export GOTOOLCHAIN := local
 
+include /usr/share/dpkg/architecture.mk
+
+# ---------------------------------------------------------------------------
+# Go toolchain
+#
+# The package is built with the Go toolchain bundled in the source package
+# (_gotoolchain/<debian-arch>.zip, put there by
+# scripts/build-source-package.sh), NOT with the Go of the Ubuntu series.
+# Upstream sshpiper tracks the newest Go release; every Ubuntu series is
+# frozen on an older one; and Launchpad builders have no network to fetch a
+# newer one. Building with the series' Go broke on nearly every upstream
+# release. With the toolchain in the source, there is no Go build-dependency
+# at all and every series builds the unmodified upstream tree.
+# ---------------------------------------------------------------------------
 BUILDDIR := $(CURDIR)/_build
 BINDIR   := $(BUILDDIR)/bin
+GODIR    := $(BUILDDIR)/goroot
+GO       := $(GODIR)/bin/go
+GO_ZIP   := _gotoolchain/$(DEB_HOST_ARCH).zip
+
+# Don't leak a GOROOT into the go command: it locates its own tree from the
+# path of the binary we run.
+unexport GOROOT
+
+# `full` build tag includes the optional upstream plugins. Without it, those
+# plugins' main.go is gated off by `//go:build full || e2e` and `go build`
+# fails with "build constraints exclude all Go files". Harmless on
+# cmd/sshpiperd, which doesn't use the tag.
+export GOFLAGS := -mod=vendor -trimpath -tags=full
+export GO111MODULE := on
+# Launchpad builders have no network; vendored deps only, and never try to
+# fetch a different toolchain than the bundled one.
+export GOPROXY := off
+export GOTOOLCHAIN := local
 
 # Launchpad's sbuild sets HOME=/sbuild-nonexistent (a read-only canary
 # path) to catch packages that try to write to $HOME during build. Go's
@@ -41,28 +46,53 @@ export GOCACHE := $(BUILDDIR)/.gocache
 export GOTMPDIR := $(BUILDDIR)/.gotmp
 export GOMODCACHE := $(BUILDDIR)/.gomodcache
 
+# Go's official 32-bit ARM toolchain defaults to ARMv6 code. Ubuntu armhf
+# is ARMv7 with VFPv3 — target that, as Ubuntu's own Go does.
+ifeq ($(DEB_HOST_ARCH),armhf)
+export GOARM := 7
+endif
+
 # Plugins discovered at build time from plugin/*/main.go.
-# Tweak this list if upstream layout changes.
 PLUGINS := $(notdir $(patsubst %/,%,$(dir $(wildcard plugin/*/main.go))))
 
 %:
-	dh $@ --buildsystem=golang --with=golang
+	dh $@
+
+# Every dh_auto_* step is overridden, so debhelper never has to guess a
+# build system for the upstream tree.
+override_dh_auto_configure:
+	@if [ ! -f "$(GO_ZIP)" ]; then \
+		echo 'error: no bundled Go toolchain for $(DEB_HOST_ARCH) ($(GO_ZIP) missing).' >&2; \
+		echo '       Add the architecture to debian/control and to go_arch_for() in scripts/build-source-package.sh.' >&2; \
+		exit 1; \
+	fi
+	rm -rf $(GODIR) $(BUILDDIR)/goroot.unpack
+	mkdir -p $(BUILDDIR)/goroot.unpack
+	unzip -q $(GO_ZIP) -d $(BUILDDIR)/goroot.unpack
+	# The zip holds a single tree: golang.org/toolchain@v0.0.1-goX.Y.Z.linux-ARCH/
+	mv $(BUILDDIR)/goroot.unpack/golang.org/toolchain@* $(GODIR)
+	rm -rf $(BUILDDIR)/goroot.unpack
+	# Module zips carry no permission bits; restore the executable bit on
+	# the commands, exactly as the go command does when it switches
+	# toolchains itself.
+	find $(GODIR)/bin $(GODIR)/pkg/tool -type f -exec chmod 0755 {} +
+	$(GO) version
 
 override_dh_auto_build:
-	@if [ -z "$(GO_BINDIR)" ]; then \
-		echo 'error: no /usr/lib/go-{1.25,1.24}/bin found — check Build-Depends' >&2; \
+	@if [ -z "$(PLUGINS)" ]; then \
+		echo 'error: no plugin/*/main.go found — upstream layout changed' >&2; \
 		exit 1; \
 	fi
 	mkdir -p $(BINDIR) $(GOCACHE) $(GOTMPDIR) $(GOMODCACHE)
-	# cmd/sshpiperd is a nested Go module (upstream v1.6.1+) with its own
-	# go.mod, vendor/, and a `replace golang.org/x/crypto => ...` pointing
-	# at the sshpiper-forked SSH library. Must be built from inside its own
-	# module root — `go build ./cmd/sshpiperd` from the parent errors with
-	# "main module does not contain package". Plugins remain part of the
-	# parent module and build from $(CURDIR).
-	(cd cmd/sshpiperd && go build -o $(BINDIR)/sshpiperd .)
-	for p in $(PLUGINS); do \
-	  go build -o $(BINDIR)/sshpiperd-plugin-$$p ./plugin/$$p || exit 1; \
+	# Each target is built from inside its own directory so Go resolves
+	# whichever module encloses it. cmd/sshpiperd is a nested module since
+	# upstream v1.6.1 (`go build ./cmd/sshpiperd` from the root fails with
+	# "main module does not contain package"); the plugins currently belong
+	# to the root module. build-source-package.sh vendors every module
+	# involved.
+	cd cmd/sshpiperd && $(GO) build -o $(BINDIR)/sshpiperd .
+	set -e; for p in $(PLUGINS); do \
+	  (cd plugin/$$p && $(GO) build -o $(BINDIR)/sshpiperd-plugin-$$p .); \
 	done
 
 override_dh_auto_install:
@@ -72,7 +102,7 @@ override_dh_auto_install:
 	install -d debian/sshpiperd/etc/sshpiperd
 	install -d debian/sshpiperd/var/lib/sshpiperd
 	# sshpiperd-plugins package
-	for p in $(PLUGINS); do \
+	set -e; for p in $(PLUGINS); do \
 	  install -D -m0755 $(BINDIR)/sshpiperd-plugin-$$p \
 	    debian/sshpiperd-plugins/usr/lib/sshpiperd/plugins/$$p; \
 	done
@@ -89,5 +119,6 @@ override_dh_dwz:
 	# dwz wouldn't have done anything anyway.
 
 override_dh_auto_clean:
+	# Must work without Go: `dpkg-buildpackage -S` runs this on the CI
+	# runner before the toolchain is ever unpacked.
 	rm -rf $(BUILDDIR)
-	dh_auto_clean

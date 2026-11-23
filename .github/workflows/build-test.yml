@@ -1,0 +1,100 @@
+name: build-test
+
+# Dry run of the release pipeline, minus signing and upload: build an
+# UNSIGNED source package for the latest upstream release and test-build the
+# binaries offline for every target series, exactly as ppa-release does
+# before it uploads.
+#
+# Runs on changes to the packaging so a broken debian/ tree or build script
+# is caught in the PR instead of on Launchpad, where a failed build burns
+# the version. Runs with a read-only token, no secrets and no access to the
+# ppa-release Environment, so nothing here can sign or upload.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'debian/**'
+      - 'scripts/**'
+      - '.github/workflows/build-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'debian/**'
+      - 'scripts/**'
+      - '.github/workflows/build-test.yml'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to test (e.g. v1.6.2). Leave blank for the latest release.'
+        required: false
+        default: ''
+
+permissions: {}
+
+concurrency:
+  group: build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build test (${{ matrix.series }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with the default series list in ppa-release.yml.
+        series: [jammy, noble, resolute]
+    steps:
+      - name: Checkout packaging repo
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install build tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            devscripts debhelper golang-go \
+            git jq xz-utils ca-certificates
+
+      - name: Resolve upstream tag
+        id: tag
+        env:
+          MANUAL_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MANUAL_TAG}" ]; then
+            TAG="${MANUAL_TAG}"
+          else
+            TAG="$(curl -fsSL --retry 3 \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              https://api.github.com/repos/tg123/sshpiper/releases/latest \
+              | jq -r '.tag_name')"
+          fi
+          if [ -z "${TAG}" ] || [ "${TAG}" = "null" ]; then
+            echo "::error::Could not resolve an upstream tag" >&2
+            exit 1
+          fi
+          echo "Testing upstream tag: ${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned source package
+        env:
+          UPSTREAM_TAG: ${{ steps.tag.outputs.tag }}
+          SERIES:       ${{ matrix.series }}
+          PPA_REV:      '1'
+          DEBFULLNAME:  'Ryan Lovett'
+          DEBEMAIL:     'ryan@pixelated.cloud'
+          NO_SIGN:      '1'
+        run: ./scripts/build-source-package.sh
+
+      - name: Test binary build offline (as a Launchpad builder would)
+        env:
+          SERIES: ${{ matrix.series }}
+        run: ./scripts/test-binary-build.sh

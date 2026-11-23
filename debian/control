@@ -2,18 +2,22 @@ Source: sshpiperd
 Section: net
 Priority: optional
 Maintainer: Ryan Lovett <ryan@pixelated.cloud>
+# No Go build-dependency on purpose: the package is built with the Go
+# toolchain bundled in the source package (see debian/rules). unzip unpacks it.
 Build-Depends:
  debhelper-compat (= 13),
- golang-1.25-go | golang-1.24-go,
- dh-golang
+ unzip
 Standards-Version: 4.6.2
 Homepage: https://github.com/tg123/sshpiper
 Vcs-Browser: https://github.com/tg123/sshpiper
 Vcs-Git: https://github.com/tg123/sshpiper.git
 Rules-Requires-Root: no
 
+# Architectures are listed explicitly rather than `any`: each one needs a
+# bundled Go toolchain, and scripts/build-source-package.sh reads this list
+# to decide which to bundle. Keep both packages' lists identical.
 Package: sshpiperd
-Architecture: any
+Architecture: amd64 arm64 armhf
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
@@ -25,7 +29,7 @@ Description: SSH reverse proxy / connection router
  per-user routing without shell accounts on the proxy itself.
 
 Package: sshpiperd-plugins
-Architecture: any
+Architecture: amd64 arm64 armhf
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},

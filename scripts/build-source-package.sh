@@ -2,9 +2,18 @@
 # Build a signed Debian source package for ppa:ryanlovett/sshpiperd.
 #
 # Fetches the upstream sshpiper source at $UPSTREAM_TAG, vendors Go deps,
-# overlays this repo's debian/ tree, rewrites debian/changelog for the
-# target $SERIES, and runs `dpkg-buildpackage -S` to produce the .dsc /
-# .changes / .orig.tar.xz / .debian.tar.xz artifacts in $OUTDIR.
+# bundles the Go toolchain upstream requires, overlays this repo's debian/
+# tree, rewrites debian/changelog for the target $SERIES, and runs
+# `dpkg-buildpackage -S` to produce the .dsc / .changes / .orig.tar.xz /
+# .debian.tar.xz artifacts in $OUTDIR.
+#
+# The upstream source is packaged UNMODIFIED. Upstream tracks the newest Go
+# release (go.mod `go` directive, new stdlib APIs) while every Ubuntu series
+# is frozen on an older one, so building with the series' own Go broke on
+# nearly every upstream release and needed a new workaround each time
+# (dropping plugins, capping go directives, backporting stdlib calls). The
+# source package now carries the Go toolchain itself — see "Bundling the Go
+# toolchain" below — so nothing here depends on which Go a series ships.
 #
 # Required env:
 #   UPSTREAM_TAG  e.g. v1.3.16
@@ -17,17 +26,25 @@
 # Optional env:
 #   OUTDIR           default: $PWD/build
 #   UPSTREAM_REPO    default: https://github.com/tg123/sshpiper.git
-#   CHANGELOG_MSG    default: "Automated build for ${UPSTREAM_TAG} on ${SERIES}"
+#   CHANGELOG_MSG    default: "Automated build for ${UPSTREAM_TAG} on ${SERIES}
+#                    (bundled Go <version>)"
 #   NO_SIGN          if set, pass -us -uc (unsigned; for local dry-runs only)
-#   UPSTREAM_SUFFIX  appended to the upstream version. Defaults to "+${SERIES}"
-#                    so every series gets its own orig-tarball filename slot on
-#                    Launchpad — necessary because the per-series steps below
-#                    (dropping plugin/kubernetes, capping go directives) make
-#                    the orig content diverge across series, and Launchpad
-#                    stores only one orig per <package>_<upstream-version>.
-#                    Override to a fixed string (e.g. "+p1") to force a fresh
-#                    slot when re-uploading after a mistake. Git clone still
-#                    uses the raw UPSTREAM_TAG — only the version string moves.
+#   REBUILD          rebuild number (2, 3, …) for re-uploading a tag whose
+#                    earlier upload for this series was rejected or failed to
+#                    build. Launchpad never lets a version be reused, so a
+#                    retry needs a new one: REBUILD=2 gives
+#                    1.6.2+noble2-0ppa1~noble1, which sorts above the first
+#                    attempt's 1.6.2+noble-0ppa1~noble1.
+#   UPSTREAM_SUFFIX  full override of the upstream-version suffix. Defaults
+#                    to "+${SERIES}${REBUILD}". Keep the series in it: each
+#                    series must own its orig-tarball filename slot, because
+#                    Launchpad stores one orig per <package>_<upstream-version>
+#                    for the whole PPA and rejects a second upload whose
+#                    bytes differ. Git clone still uses the raw UPSTREAM_TAG —
+#                    only the version string moves.
+#   GO_VERSION       Go toolchain to bundle, e.g. 1.27.4. Default: the latest
+#                    patch release of the newest Go line upstream's go.mod
+#                    files ask for.
 
 set -euo pipefail
 
@@ -39,20 +56,26 @@ set -euo pipefail
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/tg123/sshpiper.git}"
 OUTDIR="${OUTDIR:-$PWD/build}"
-CHANGELOG_MSG="${CHANGELOG_MSG:-Automated build for ${UPSTREAM_TAG} on ${SERIES}}"
 
-# Upstream version: strip leading 'v' if present, then append UPSTREAM_SUFFIX.
-# Default suffix is "+${SERIES}" so each Ubuntu series owns its own orig
-# filename slot on Launchpad — required because the per-series steps below
-# make orig content diverge across series. Git clone still uses raw UPSTREAM_TAG.
-UPSTREAM_SUFFIX="${UPSTREAM_SUFFIX:-+${SERIES}}"
+# Upstream version: strip leading 'v' if present, then append the suffix.
+# The suffix always carries the series so each Ubuntu series owns its own
+# orig filename slot on Launchpad (see UPSTREAM_SUFFIX above), plus the
+# optional rebuild number. Git clone still uses raw UPSTREAM_TAG.
+REBUILD="${REBUILD:-}"
+if ! [[ "${REBUILD}" =~ ^[0-9]*$ ]]; then
+    echo "error: REBUILD must be a number (e.g. 2), got '${REBUILD}'" >&2
+    exit 1
+fi
+UPSTREAM_SUFFIX="${UPSTREAM_SUFFIX:-+${SERIES}${REBUILD}}"
 UPSTREAM_VERSION="${UPSTREAM_TAG#v}${UPSTREAM_SUFFIX}"
 DEB_VERSION="${UPSTREAM_VERSION}-0ppa${PPA_REV}~${SERIES}1"
-echo "==> UPSTREAM_SUFFIX='${UPSTREAM_SUFFIX}' -> package version ${UPSTREAM_VERSION}"
+echo "==> UPSTREAM_SUFFIX='${UPSTREAM_SUFFIX}' -> package version ${DEB_VERSION}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$(mktemp -d -t sshpiperd-ppa.XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# The Go module cache marks its directories read-only; make them writable
+# again before removing or `rm -rf` fails and leaves the workdir behind.
+trap 'chmod -R u+w "$WORKDIR" 2>/dev/null || true; rm -rf "$WORKDIR"' EXIT
 
 echo "==> Cloning ${UPSTREAM_REPO} at ${UPSTREAM_TAG} (with submodules)"
 # Upstream uses a `crypto` submodule (their fork of golang.org/x/crypto
@@ -67,12 +90,9 @@ git clone --depth 1 --branch "${UPSTREAM_TAG}" \
 SRCDIR="${WORKDIR}/sshpiperd-${UPSTREAM_VERSION}"
 cd "${SRCDIR}"
 
-# Derive a deterministic timestamp from the upstream tag's commit so re-runs
-# of the same series produce a byte-identical .orig.tar.xz. Launchpad stores
-# one orig per <package>_<upstream-version> and rejects uploads that differ
-# in content; each series has its own upstream-version now (see UPSTREAM_SUFFIX
-# default above), so cross-series identity isn't required — but per-series
-# reproducibility still is, so any re-upload after a partial failure matches.
+# Derive a deterministic timestamp from the upstream tag's commit, used for
+# file mtimes in the orig tarball and by dpkg for the package's build date,
+# so the output depends on the inputs rather than on when the job ran.
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
     export SOURCE_DATE_EPOCH
@@ -87,160 +107,193 @@ find . -name .git -print0 | xargs -0 rm -rf
 rm -f .gitmodules
 rm -rf .github
 
-# Drop plugin/kubernetes on series that lack Go 1.25 (currently anything
-# < resolute). The Kubernetes client-go v0.35 set declares `go 1.25.0` in
-# its own go.mod, and Go's vendor mode enforces every vendored module's
-# `go` directive — not just the one we're building. No other direct dep
-# of sshpiper v1.5.3 requires 1.25 (checked 2026-04-21), so dropping the
-# kubernetes plugin + its direct k8s.io/* requires is sufficient.
-#
-# Revisit when noble-updates (or the target series) ships Go 1.25.
-case "${SERIES}" in
-    noble|jammy|focal)
-        echo "==> ${SERIES} lacks Go 1.25 — dropping plugin/kubernetes and k8s.io/* deps"
-        rm -rf plugin/kubernetes
-        for pkg in $(go mod edit -json \
-                     | grep -o '"Path":[[:space:]]*"k8s\.io/[^"]*"' \
-                     | cut -d'"' -f4 | sort -u); do
-            echo "    go mod edit -droprequire=${pkg}"
-            go mod edit "-droprequire=${pkg}"
-        done
-        ;;
-esac
+# ---------------------------------------------------------------------------
+# Go environment for this script. Pinned explicitly so nothing inherited from
+# the runner (go.env, GOFLAGS, a GOPRIVATE/GONOSUMDB that would skip checksum
+# verification) can change what gets downloaded or weaken how it is verified.
+# Everything is fetched into a throwaway module cache under WORKDIR.
+# ---------------------------------------------------------------------------
+export GOMODCACHE="${WORKDIR}/gomodcache"
+export GOFLAGS=-modcacherw
+export GOPROXY=https://proxy.golang.org,direct
+export GOSUMDB=sum.golang.org
+unset GONOSUMDB GONOSUMCHECK GONOPROXY GOPRIVATE GOINSECURE GOROOT
 
-echo "==> Vendoring Go dependencies (Launchpad builders have no network)"
-# Vendor with upstream's go.mod intact (minus any drops above), so the
-# runner's Go can auto-fetch whatever toolchain upstream declares. We
-# lower the directive AFTER vendoring, below.
-go mod vendor
-
-echo "==> Stripping toolchain directive from go.mod"
-# Launchpad builders have no network during build (GOPROXY=off), so a
-# `toolchain` directive's auto-download would fail. Safe to strip on every
-# series: the installed Go is already what we want to use.
-sed -i '/^toolchain /d' go.mod
-
-# Cap go directives to the newest Go available on each target series.
-# Upstream's go.mod and some vendored deps' go.mod (recorded as
-# `## explicit; go X.Y` in vendor/modules.txt) keep marching forward
-# (1.25, 1.26, …); each series gets stuck on whatever Go landed in
-# main+updates by release time. Go's vendor mode enforces *every*
-# vendored module's directive, so both files must be capped together.
-# If upstream ever uses a genuine language feature newer than the cap,
-# the Launchpad build will surface it as a real compile error.
-#
-# Update this table when a new series is added or when one gets a Go
-# point-release bump that lets us raise the cap. Leave the default arm
-# empty for series newer than anything we've seen, on the assumption
-# that they ship a Go new enough for upstream's current directive.
-case "${SERIES}" in
-    focal|jammy|noble) GO_CAP=1.24 ;;
-    resolute)          GO_CAP=1.25 ;;
-    *)                 GO_CAP=    ;;
-esac
-
-if [ -n "${GO_CAP}" ]; then
-    echo "==> Capping go directives to ${GO_CAP} for ${SERIES}"
-    sed -i -E "s/^go [0-9]+\\.[0-9]+(\\.[0-9]+)?\$/go ${GO_CAP}/" go.mod
-    sed -i -E "s/^(## (.*; )?go )[0-9]+\\.[0-9]+(\\.[0-9]+)?\$/\\1${GO_CAP}/" \
-        vendor/modules.txt
-else
-    echo "==> ${SERIES}: no cap configured — leaving go directives as upstream declares"
+# Any Go >= 1.21 on the runner will do: it is only a launcher that downloads
+# and runs the toolchain version selected below.
+if ! GOTOOLCHAIN=local go version >/dev/null 2>&1; then
+    echo "error: no 'go' on PATH (any Go >= 1.21 works; it only bootstraps)" >&2
+    exit 1
 fi
 
-# Upstream v1.6.1 calls *os.Root.MkdirAll (Go 1.25, added Aug 2025) at
-# cmd/sshpiperd/daemon.go:476. Noble/jammy ship Go 1.24, whose stdlib
-# doesn't have that method — the go-directive cap only caps language level,
-# not stdlib surface. Rather than drop older series (Ryan wants all three
-# LTS+STS supported), inject a small backport that walks the path with
-# Mkdir + OpenRoot (both Go 1.24 stdlib when *os.Root was introduced), which
-# preserves the exact symlink-containment guarantee upstream deliberately
-# relies on. Shim is universal — works on Go 1.24 AND 1.25 — so applied
-# unconditionally, no series-specific branching.
+# ---------------------------------------------------------------------------
+# What do we build, and which Go modules does that involve?
 #
-# When bumping to a new upstream tag, re-audit for new Go 1.25+ patterns:
-#     grep -rnE '\.(MkdirAll|Chmod|Chown|Chtimes|Symlink|Readlink|Lchown|Chdir)\(' cmd/sshpiperd/
-#     grep -rnE '(os\.CopyFS|slog\.DiscardHandler)' cmd/sshpiperd/
-if [ -f cmd/sshpiperd/daemon.go ] && grep -q 'd\.recordRoot\.MkdirAll' cmd/sshpiperd/daemon.go; then
-    echo "==> Injecting *os.Root.MkdirAll backport shim into cmd/sshpiperd/"
-    cat >cmd/sshpiperd/os_root_backport.go <<'EOF'
-// Injected by ryanlovett/sshpiperd-ppa build script.
-// Backport of *os.Root.MkdirAll (added in Go 1.25). Walks path components
-// with Mkdir + OpenRoot (both Go 1.24 stdlib when *os.Root was introduced),
-// preserving the symlink-containment guarantee upstream relies on.
-// Universal: works on Go 1.24 AND 1.25 — no build tag needed.
-package main
-
-import (
-	"errors"
-	"os"
-	"path/filepath"
-	"strings"
-)
-
-func mkdirAllRoot(root *os.Root, path string, perm os.FileMode) error {
-	cur := root
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
-		if part == "" || part == "." {
-			continue
-		}
-		if err := cur.Mkdir(part, perm); err != nil && !errors.Is(err, os.ErrExist) {
-			if cur != root {
-				_ = cur.Close()
-			}
-			return err
-		}
-		next, err := cur.OpenRoot(part)
-		if err != nil {
-			if cur != root {
-				_ = cur.Close()
-			}
-			return err
-		}
-		if cur != root {
-			_ = cur.Close()
-		}
-		cur = next
-	}
-	if cur != root {
-		_ = cur.Close()
-	}
-	return nil
+# debian/rules builds cmd/sshpiperd plus every plugin/*/main.go, each from
+# inside its own directory, so Go resolves whichever module encloses it.
+# Upstream has already moved cmd/sshpiperd into a nested module once
+# (v1.6.1); deriving the module list from the build targets means the next
+# such restructuring needs no change here.
+# ---------------------------------------------------------------------------
+module_root() {
+    local d="$1"
+    while [ ! -f "${d}/go.mod" ]; do
+        [ "${d}" = "." ] && return 1
+        d="$(dirname "${d}")"
+    done
+    printf '%s\n' "${d}"
 }
-EOF
-    sed -i 's|d\.recordRoot\.MkdirAll(subdir, 0o700)|mkdirAllRoot(d.recordRoot, subdir, 0o700)|' \
-        cmd/sshpiperd/daemon.go
-    # Fail fast if upstream changed the call site (different args/var name):
-    # the grep guard above would still match but the sed wouldn't take, and
-    # the build would only die later on Launchpad with the original
-    # "MkdirAll undefined" error. Better to stop here in the runner.
-    if grep -q 'recordRoot\.MkdirAll' cmd/sshpiperd/daemon.go; then
-        echo "error: MkdirAll call site changed upstream — shim sed did not apply; update the shim" >&2
+
+if [ ! -d cmd/sshpiperd ]; then
+    echo "error: cmd/sshpiperd not found — upstream layout changed; update debian/rules and this script" >&2
+    exit 1
+fi
+shopt -s nullglob
+plugin_mains=( plugin/*/main.go )
+shopt -u nullglob
+if [ ${#plugin_mains[@]} -eq 0 ]; then
+    echo "error: no plugin/*/main.go found — upstream layout changed; update debian/rules and this script" >&2
+    exit 1
+fi
+
+MODULE_ROOTS=()
+for target in cmd/sshpiperd "${plugin_mains[@]%/main.go}"; do
+    if ! root="$(module_root "${target}")"; then
+        echo "error: no go.mod found above ${target}" >&2
         exit 1
     fi
+    seen=
+    for m in "${MODULE_ROOTS[@]}"; do
+        [ "${m}" = "${root}" ] && seen=1
+    done
+    [ -n "${seen}" ] || MODULE_ROOTS+=("${root}")
+done
+echo "==> Go modules to vendor: ${MODULE_ROOTS[*]}"
+
+# ---------------------------------------------------------------------------
+# Bundling the Go toolchain
+#
+# Launchpad builders have no network, and the Go in each Ubuntu series lags
+# what upstream needs. So the toolchain goes in the source package: one
+# official Go release per architecture we build for, as the module zips Go
+# itself uses for toolchain switching (golang.org/toolchain@v0.0.1-goX.Y.Z.
+# linux-ARCH). `go mod download` verifies each zip against the Go checksum
+# database (sum.golang.org, a public transparency log) before we accept it,
+# and the zips are stored byte-for-byte so anyone can re-verify them from
+# the recorded h1: hashes in _gotoolchain/MANIFEST.
+#
+# debian/rules unpacks the zip for the build architecture and uses it for
+# everything; the series' own Go is never involved.
+# ---------------------------------------------------------------------------
+
+# Newest Go version any of our modules asks for (`go` or `toolchain` line).
+GO_REQUIRED=
+for m in "${MODULE_ROOTS[@]}"; do
+    while read -r v; do
+        v="${v#go}"
+        if ! [[ "${v}" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "error: cannot parse Go version '${v}' from ${m}/go.mod" >&2
+            exit 1
+        fi
+        GO_REQUIRED="$(printf '%s\n%s\n' "${GO_REQUIRED}" "${v}" | sort -V | tail -n1)"
+    done < <(awk '$1 == "go" || $1 == "toolchain" { print $2 }' "${m}/go.mod")
+done
+if [ -z "${GO_REQUIRED}" ]; then
+    echo "error: no go directive found in: ${MODULE_ROOTS[*]}" >&2
+    exit 1
 fi
+echo "==> Upstream requires Go >= ${GO_REQUIRED}"
 
-# As of upstream v1.6.1, cmd/sshpiperd is its own nested Go module with a
-# `replace golang.org/x/crypto => github.com/tg123/sshpiper.crypto ...` for the
-# sshpiper-forked SSH library. It needs its own vendor tree, and its go.mod
-# (and vendor/modules.txt) need the same toolchain-strip + go-directive cap
-# treatment as the root module. Guarded so older tags (single-module layout)
-# still build unchanged.
-if [ -f cmd/sshpiperd/go.mod ]; then
-    echo "==> cmd/sshpiperd is a nested module — vendoring it too"
-    (cd cmd/sshpiperd && go mod vendor)
+# Queries about Go itself run from a scratch module, so the runner's own
+# (older) Go is not asked to load upstream's go.mod.
+SCRATCH_MOD="${WORKDIR}/scratchmod"
+mkdir -p "${SCRATCH_MOD}"
+printf 'module scratch\n\ngo 1.21\n' > "${SCRATCH_MOD}/go.mod"
 
-    echo "==> Stripping toolchain directive from cmd/sshpiperd/go.mod"
-    sed -i '/^toolchain /d' cmd/sshpiperd/go.mod
-
-    if [ -n "${GO_CAP}" ]; then
-        echo "==> Capping cmd/sshpiperd go directives to ${GO_CAP}"
-        sed -i -E "s/^go [0-9]+\\.[0-9]+(\\.[0-9]+)?\$/go ${GO_CAP}/" \
-            cmd/sshpiperd/go.mod
-        sed -i -E "s/^(## (.*; )?go )[0-9]+\\.[0-9]+(\\.[0-9]+)?\$/\\1${GO_CAP}/" \
-            cmd/sshpiperd/vendor/modules.txt
+if [ -z "${GO_VERSION:-}" ]; then
+    # Latest patch release of the required line (1.27.0 -> 1.27.x), so the
+    # binaries pick up Go's security fixes. Falls back to exactly what
+    # upstream declared if the lookup fails or the line has no release yet
+    # (e.g. upstream pinned a release candidate).
+    GO_LINE="$(printf '%s' "${GO_REQUIRED}" | grep -oE '^[0-9]+\.[0-9]+')"
+    GO_VERSION="$(cd "${SCRATCH_MOD}" \
+                  && GOTOOLCHAIN=local go list -m -f '{{.Version}}' "go@${GO_LINE}" 2>/dev/null)" \
+        || GO_VERSION=
+    if [ -z "${GO_VERSION}" ] \
+       || [ "$(printf '%s\n%s\n' "${GO_REQUIRED}" "${GO_VERSION}" | sort -V | tail -n1)" != "${GO_VERSION}" ]; then
+        echo "    (could not resolve a newer ${GO_LINE}.x release — using ${GO_REQUIRED} as declared)"
+        GO_VERSION="${GO_REQUIRED}"
     fi
 fi
+echo "==> Bundling Go ${GO_VERSION}"
+
+# Debian architecture -> Go architecture. The list of architectures comes
+# from debian/control, so the package can never be built somewhere it has no
+# toolchain for: to add one, add it to Architecture: there and to this table.
+go_arch_for() {
+    case "$1" in
+        amd64)   echo amd64 ;;
+        arm64)   echo arm64 ;;
+        armhf)   echo arm ;;
+        i386)    echo 386 ;;
+        ppc64el) echo ppc64le ;;
+        riscv64) echo riscv64 ;;
+        s390x)   echo s390x ;;
+        *)       return 1 ;;
+    esac
+}
+
+mapfile -t DEB_ARCHES < <(awk '/^Architecture:/ { for (i = 2; i <= NF; i++) print $i }' \
+                              "${REPO_ROOT}/debian/control" | sort -u)
+if [ ${#DEB_ARCHES[@]} -eq 0 ]; then
+    echo "error: no Architecture: field found in debian/control" >&2
+    exit 1
+fi
+
+mkdir -p _gotoolchain
+: > _gotoolchain/MANIFEST
+for deb_arch in "${DEB_ARCHES[@]}"; do
+    if ! go_arch="$(go_arch_for "${deb_arch}")"; then
+        echo "error: debian/control lists Architecture '${deb_arch}', which has no Go toolchain mapping in $0 (wildcards like 'any' are not supported — list architectures explicitly)" >&2
+        exit 1
+    fi
+    mod_version="v0.0.1-go${GO_VERSION}.linux-${go_arch}"
+    echo "    golang.org/toolchain@${mod_version} (for ${deb_arch})"
+    info="$(cd "${SCRATCH_MOD}" \
+            && GOTOOLCHAIN=local go mod download -json "golang.org/toolchain@${mod_version}")"
+    zip="$(jq -r '.Zip // empty' <<< "${info}")"
+    sum="$(jq -r '.Sum // empty' <<< "${info}")"
+    if [ -z "${zip}" ] || [ ! -s "${zip}" ] || [ -z "${sum}" ]; then
+        echo "error: failed to download Go ${GO_VERSION} for linux-${go_arch}:" >&2
+        echo "${info}" >&2
+        exit 1
+    fi
+    # Named by Debian architecture so debian/rules needs no mapping table.
+    cp "${zip}" "_gotoolchain/${deb_arch}.zip"
+    printf '%s %s golang.org/toolchain %s %s\n' \
+        "${deb_arch}" "${go_arch}" "${mod_version}" "${sum}" >> _gotoolchain/MANIFEST
+done
+cat > _gotoolchain/README <<EOF
+Go ${GO_VERSION} toolchains, added by the sshpiperd-ppa packaging (not part of
+upstream sshpiper). debian/rules builds the package with the one matching
+the build architecture, because the Go shipped by Ubuntu is older than
+upstream sshpiper requires and Launchpad builders have no network access.
+
+Each <arch>.zip is the unmodified Go toolchain module from proxy.golang.org.
+MANIFEST lists, per Debian architecture: the Go architecture, module path,
+module version and the h1: hash that was verified against the Go checksum
+database (https://sum.golang.org) when this source package was assembled.
+EOF
+
+# From here on, every `go` invocation in this script runs as exactly the
+# bundled version — the same one that will compile the binaries.
+export GOTOOLCHAIN="go${GO_VERSION}"
+
+echo "==> Vendoring Go dependencies (Launchpad builders have no network)"
+for m in "${MODULE_ROOTS[@]}"; do
+    echo "    go mod vendor in ${m}"
+    (cd "${m}" && go mod vendor)
+done
 
 echo "==> Overlaying debian/ tree from ${REPO_ROOT}"
 cp -a "${REPO_ROOT}/debian" ./debian
@@ -256,15 +309,18 @@ mkdir -p "${OUTDIR}"
 # relative to the source directory, so stage it in WORKDIR (the parent of
 # SRCDIR) first. We'll move it to OUTDIR with the rest of the artifacts.
 ORIG_TARBALL="${WORKDIR}/sshpiperd_${UPSTREAM_VERSION}.orig.tar.xz"
+# The toolchain zips are ~75 MB each and already compressed; -T0 lets xz use
+# every core so this takes seconds rather than minutes.
 tar --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime="@${SOURCE_DATE_EPOCH:-$(date +%s)}" \
-    -C "${WORKDIR}" -cJf "${ORIG_TARBALL}" \
+    -C "${WORKDIR}" -I 'xz -T0' -cf "${ORIG_TARBALL}" \
     --exclude='sshpiperd-*/debian' \
     "sshpiperd-${UPSTREAM_VERSION}"
 echo "    -> ${ORIG_TARBALL}"
 
 echo "==> Rewriting debian/changelog for ${DEB_VERSION} / ${SERIES}"
 export DEBFULLNAME DEBEMAIL
+CHANGELOG_MSG="${CHANGELOG_MSG:-Automated build for ${UPSTREAM_TAG} on ${SERIES} (bundled Go ${GO_VERSION})}"
 # Replace the changelog entirely so re-runs are idempotent and the version
 # string is always the one we computed (not whatever was committed).
 rm -f debian/changelog
@@ -288,19 +344,22 @@ dpkg-buildpackage "${BUILD_FLAGS[@]}"
 
 echo "==> Collecting artifacts into ${OUTDIR}"
 cd "${WORKDIR}"
+# No `|| true`: a missing artifact must stop the run here, not surface later
+# as a confusing dput or Launchpad failure.
 mv -v \
     "sshpiperd_${UPSTREAM_VERSION}.orig.tar.xz" \
     "sshpiperd_${DEB_VERSION}.dsc" \
     "sshpiperd_${DEB_VERSION}.debian.tar."* \
     "sshpiperd_${DEB_VERSION}_source.changes" \
     "sshpiperd_${DEB_VERSION}_source.buildinfo" \
-    "${OUTDIR}/" 2>/dev/null || true
+    "${OUTDIR}/"
 
 echo "==> Done. Artifacts in ${OUTDIR}:"
 ls -l "${OUTDIR}"
 
 cat <<EOF
 
-Next step (manual first time, automated via workflow after):
+Next steps (automated by the ppa-release workflow):
+  SERIES=${SERIES} scripts/test-binary-build.sh   # offline build test, needs Docker
   dput ppa:ryanlovett/sshpiperd ${OUTDIR}/sshpiperd_${DEB_VERSION}_source.changes
 EOF

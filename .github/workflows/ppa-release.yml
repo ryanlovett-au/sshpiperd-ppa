@@ -1,7 +1,8 @@
 name: ppa-release
 
 # Poll upstream tg123/sshpiper for new tags, build a signed Debian source
-# package for each target Ubuntu series, and dput it to the Launchpad PPA.
+# package for each target Ubuntu series, prove it builds offline in a clean
+# container of that series, and only then dput it to the Launchpad PPA.
 #
 # Security posture (see README.md "Release hardening"):
 #   * All third-party actions pinned to commit SHAs, never tags.
@@ -32,8 +33,8 @@ on:
         description: 'Comma-separated Ubuntu series (e.g. jammy,noble,resolute).'
         required: false
         default: 'jammy,noble,resolute'
-      upstream_suffix:
-        description: 'Optional suffix on the upstream version (e.g. "+p1") to move past a stuck Launchpad filename slot. Leave blank for normal releases.'
+      rebuild:
+        description: 'Rebuild number (2, 3, …) to re-upload a tag whose earlier upload was rejected or failed to build — Launchpad never lets a version be reused. Leave blank for normal releases.'
         required: false
         default: ''
 
@@ -66,9 +67,13 @@ jobs:
         env:
           MANUAL_TAG:    ${{ inputs.upstream_tag }}
           MANUAL_SERIES: ${{ inputs.series }}
-          MANUAL_SUFFIX: ${{ inputs.upstream_suffix }}
+          MANUAL_REBUILD: ${{ inputs.rebuild }}
         run: |
           set -euo pipefail
+          if ! [[ "${MANUAL_REBUILD}" =~ ^[0-9]*$ ]]; then
+            echo "::error::rebuild must be a number (e.g. 2), got '${MANUAL_REBUILD}'" >&2
+            exit 1
+          fi
           if [ -n "${MANUAL_TAG}" ]; then
             TAG="${MANUAL_TAG}"
           else
@@ -93,22 +98,26 @@ jobs:
           # marker — avoids re-uploading to Launchpad (which would reject as
           # duplicate) and skips work on the matrix leg too.
           #
-          # Exception: when upstream_suffix is set, the user is explicitly
-          # asking for a rebuild (typically to grab a fresh Launchpad
-          # filename slot after a failed first attempt left it stuck).
-          # Bypass the gate for *all* requested series in that case — if
-          # you only want one series rebuilt, narrow the `series` input.
+          # Exception: when a rebuild number is given, the user is
+          # explicitly asking for a re-upload (the earlier upload of this
+          # tag was rejected or failed to build, and Launchpad never lets a
+          # version be reused). Bypass the gate for *all* requested series
+          # in that case — if you only want one series rebuilt, narrow the
+          # `series` input. The rebuild number goes after the series name
+          # in the version (1.6.2+noble2-0ppa1~noble1), so every series
+          # keeps its own orig-tarball slot and any mix of series can be
+          # rebuilt in one run.
           # The marker-tag write step is idempotent (see below), so any
           # existing markers stay put. This preserves cron's dedup
           # semantics: a bare built/<series>/<TAG> marker means "this
           # upstream tag has been processed for this series, somehow",
-          # regardless of which suffix actually landed on Launchpad.
+          # regardless of which rebuild actually landed on Launchpad.
           TO_BUILD=()
           for raw in "${REQUESTED[@]}"; do
             s="${raw// /}"  # strip spaces
             [ -z "$s" ] && continue
-            if [ -n "${MANUAL_SUFFIX}" ]; then
-              echo "Forcing rebuild of ${s}: suffix '${MANUAL_SUFFIX}' provided"
+            if [ -n "${MANUAL_REBUILD}" ]; then
+              echo "Forcing rebuild of ${s}: rebuild number ${MANUAL_REBUILD} provided"
               TO_BUILD+=("${s}")
             elif git rev-parse -q --verify "refs/tags/built/${s}/${TAG}" >/dev/null; then
               echo "Skipping ${s}: already built for ${TAG}"
@@ -157,8 +166,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
+          # golang-go is only a launcher here: build-source-package.sh has
+          # it download and run the exact Go version upstream requires, and
+          # bundles that toolchain into the source package. Any Go >= 1.21
+          # does the job, so the runner's Go version never matters.
           sudo apt-get install -y --no-install-recommends \
-            devscripts debhelper dh-golang golang-go \
+            devscripts debhelper golang-go \
             dput-ng gnupg git jq xz-utils ca-certificates \
             distro-info distro-info-data lintian
 
@@ -200,7 +213,7 @@ jobs:
       - name: Build source package
         env:
           UPSTREAM_TAG:    ${{ needs.detect.outputs.tag }}
-          UPSTREAM_SUFFIX: ${{ inputs.upstream_suffix }}
+          REBUILD:         ${{ inputs.rebuild }}
           SERIES:          ${{ matrix.series }}
           PPA_REV:         '1'
           DEBFULLNAME:     'Ryan Lovett'
@@ -229,6 +242,20 @@ jobs:
             | "${PRESET}" --preset "${KEYGRIP}"
 
           ./scripts/build-source-package.sh
+
+      - name: Test binary build offline (as a Launchpad builder would)
+        env:
+          SERIES: ${{ matrix.series }}
+        run: |
+          set -euo pipefail
+          # Launchpad never lets a version be re-uploaded, so a source
+          # package that fails on its builders burns that version and the
+          # fix has to go out as a rebuild. Build the binaries here first —
+          # clean ubuntu:<series> container, only the declared
+          # Build-Depends, no network — and stop before dput if that fails.
+          # No secrets are in this step's environment, and the container
+          # only sees the source package read-only.
+          ./scripts/test-binary-build.sh
 
       - name: Lintian source-package QA
         run: |
@@ -356,7 +383,7 @@ jobs:
           TAG="built/${SERIES}/${UPSTREAM_TAG}"
           # The marker is intentionally suffix-free — its job is to tell
           # the daily cron "this upstream tag has been processed for this
-          # series". A suffixed rerun (e.g. +p2) succeeding on top of an
+          # series". A rebuild (e.g. rebuild=2) succeeding on top of an
           # already-marked tag must NOT overwrite the existing marker,
           # and the POST below would 422 if we tried. Probe the ref first
           # and skip the write when it already exists.

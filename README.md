@@ -5,8 +5,8 @@ Packaging-only repository that builds `sshpiperd` (upstream:
 it to **`ppa:ryanlovett/sshpiperd`** on Launchpad.
 
 This repo does **not** fork upstream. It tracks upstream releases, vendors
-Go dependencies, overlays a `debian/` tree, and pushes a signed source
-package to Launchpad's builders.
+Go dependencies, bundles the Go toolchain upstream requires, overlays a
+`debian/` tree, and pushes a signed source package to Launchpad's builders.
 
 ## Why a PPA instead of the snap
 
@@ -18,7 +18,7 @@ proper systemd integration, which is what we want on Ubuntu server hosts.
 
     debian/                 Source-package metadata + maintainer scripts
       control               Source + binary package definitions
-      rules                 Build recipe (dh-golang, vendored Go deps)
+      rules                 Build recipe (bundled Go toolchain, vendored deps)
       changelog             Placeholder — rewritten by build script per release
       copyright             MIT (upstream) + MIT (packaging)
       source/format         3.0 (quilt)
@@ -27,29 +27,82 @@ proper systemd integration, which is what we want on Ubuntu server hosts.
       sshpiperd.postinst    Creates system user + state/config dirs
       sshpiperd.install     Ships default file into /etc/default/
     scripts/
-      build-source-package.sh   Clones upstream @tag, vendors, overlays, signs
+      build-source-package.sh   Clones upstream @tag, vendors, bundles Go,
+                                overlays, signs
+      test-binary-build.sh      Builds the .debs offline in a clean series
+                                container — run before every upload
     .github/workflows/
-      ppa-release.yml       Cron poll → build → dput, gated on Environment
+      ppa-release.yml       Cron poll → build → offline build test → dput,
+                            gated on Environment
+      build-test.yml        Same build + offline test, unsigned, no upload —
+                            runs on PRs that touch debian/ or scripts/
 
 No `debian/compat` file — `debhelper-compat (= 13)` in `debian/control` is
 the modern equivalent and the two are mutually exclusive.
 
-## Per-series plugin coverage
+## How the build stays independent of Ubuntu's Go
 
-sshpiper ships 10 plugins upstream: docker, failtoban, fixed, kubernetes,
-lua, metrics, simplemath, username-router, workingdir, yaml. Whether each
-plugin builds depends on the Go version available in the target Ubuntu
-series.
+Upstream sshpiper tracks the newest Go release — its `go.mod` moves to each
+new Go version and it uses new standard-library APIs as they appear. Every
+Ubuntu series is frozen on an older Go, and Launchpad builders have no
+network access to fetch a newer one. Building with the series' own Go
+therefore broke on nearly every upstream release, each time in a new way:
 
-| Series | Plugins shipped |
+| Upstream | What broke on Launchpad |
 |---|---|
-| resolute (26.04 LTS) | All 10 |
-| noble (24.04 LTS)    | All **except `kubernetes`** |
-| jammy (22.04 LTS)    | All **except `kubernetes`** |
+| v1.5.3 | `k8s.io/*` deps declared `go 1.25`; noble/jammy had 1.24 |
+| v1.5.4 | a new vendored dep declared `go 1.25` |
+| v1.5.4 | upstream `go.mod` declared `go 1.26`; resolute had 1.25 |
+| v1.6.1 | `(*os.Root).MkdirAll` (Go 1.25 stdlib) missing on Go 1.24 |
+| v1.6.2 | `uuid` package (Go 1.27 stdlib) missing on Go 1.25 — on every series |
 
-The kubernetes plugin pulls in `k8s.io/{api,apimachinery,client-go,code-generator}` v0.35, which themselves declare `go 1.25.0` in their go.mod files. Go's vendor mode enforces every vendored module's `go` directive, so even building `sshpiperd` itself fails on a builder that has Go < 1.25. Noble tops out at Go 1.24 (in `noble-updates`); jammy tops out at Go 1.24 (in `jammy-updates`).
+Each was patched around (drop the plugin, rewrite the `go` directives,
+inject a backport), and each patch only held until the next release.
 
-`scripts/build-source-package.sh` drops `plugin/kubernetes/` and the `k8s.io/*` direct requires on series that predate Go 1.25. When Ubuntu SRUs Go 1.25 into `noble-updates`, remove `noble` from the `case` block in that script and re-dispatch to get kubernetes onto noble.
+**The source package now carries the Go toolchain itself.**
+`scripts/build-source-package.sh` reads the Go version upstream's `go.mod`
+files require, picks the latest patch release of that line, and bundles the
+official toolchain for each architecture in `debian/control` under
+`_gotoolchain/` in the orig tarball. `debian/rules` unpacks the one for the
+build architecture and compiles with it. Consequences:
+
+- Upstream's source is packaged **unmodified** — no dropped plugins, no
+  edited `go.mod`, no injected shims.
+- Every series ships **every upstream plugin** (including `kubernetes`,
+  previously missing on jammy and noble).
+- There is no Go build-dependency at all (`Build-Depends` is just
+  `debhelper-compat` and `unzip`), so a series' Go version, or a new series
+  with different `golang-*` package names, cannot break the build.
+- When upstream moves to a newer Go, the next build simply bundles it.
+
+Trust: the toolchains are the Go project's own release artifacts, fetched
+as Go toolchain modules (`golang.org/toolchain@v0.0.1-goX.Y.Z.linux-ARCH`).
+The `go` command verifies each against the Go checksum database
+(`sum.golang.org`, a public transparency log) before the script accepts it,
+and the script pins `GOSUMDB`/`GOPROXY` and clears the variables that could
+disable that check. The zips go into the source package byte-for-byte, with
+their `h1:` hashes recorded in `_gotoolchain/MANIFEST`, and the whole orig
+tarball is covered by the signed `.dsc`.
+
+Cost: each source package is about 220 MB (three ~75 MB toolchains). The
+PPA quota is 8 GiB, and Launchpad removes superseded versions.
+
+To build for another architecture, add it to both `Architecture:` fields in
+`debian/control` (and to `go_arch_for()` in the build script if it is not
+already listed there), and enable it in the PPA's settings on Launchpad.
+
+### Pre-upload build test
+
+Launchpad never lets a version be uploaded twice, so a source package that
+fails on its builders burns that version. `scripts/test-binary-build.sh`
+catches that before upload: it unpacks the exact `.dsc` that will be
+uploaded inside a clean `ubuntu:<series>` container holding only the
+declared build-dependencies, and builds it with **no network**, as an
+unprivileged user with a nonexistent `$HOME` — the conditions on a
+Launchpad builder. It then checks that every plugin was packaged and the
+binary starts, and cross-compiles for the other architectures. The
+workflow runs it between building the source package and `dput`; if it
+fails, nothing is uploaded and no version is consumed.
 
 ---
 
@@ -195,6 +248,7 @@ export DEBEMAIL="ryan@pixelated.cloud"
 export GPG_KEY_ID="$SUB_FPR"
 
 ./scripts/build-source-package.sh
+./scripts/test-binary-build.sh     # offline build test; needs Docker
 dput ppa:ryanlovett/sshpiperd build/sshpiperd_*_source.changes
 ```
 
@@ -219,12 +273,39 @@ Once bootstrapped, releases run themselves:
 2. If the latest tag has no matching `built/<series>/<tag>` marker tag in
    this repo, the `build-and-upload` job queues — and **pauses for your
    approval** because of the `ppa-release` Environment.
-3. On approval, it imports the signing subkey, builds the source package,
-   signs the `.changes`, `dput`s to Launchpad, and pushes the marker tag.
+3. On approval, it imports the signing subkey, builds and signs the source
+   package, test-builds the binaries offline in a clean container of the
+   target series, and only if that passes `dput`s to Launchpad and pushes
+   the marker tag.
 4. Launchpad emails build results to the address on your Launchpad account.
 
 You can also trigger manually: **Actions → ppa-release → Run workflow**,
 optionally overriding `upstream_tag` or `series`.
+
+### Rebuilding a release
+
+If an upload was accepted but then failed to build (or was rejected), that
+version is spent — Launchpad never accepts the same version twice — and the
+marker tag stops the cron from retrying. Re-run with a rebuild number:
+
+```bash
+gh workflow run ppa-release.yml \
+    --repo ryanlovett-au/sshpiperd-ppa \
+    --ref main \
+    --field upstream_tag=v1.6.2 \
+    --field rebuild=2
+```
+
+That uploads `1.6.2+noble2-0ppa1~noble1` (and likewise for the other
+series), which sorts above the first attempt's `1.6.2+noble-0ppa1~noble1`.
+Setting `rebuild` bypasses the marker check for every requested series;
+narrow the `series` field to rebuild only some. Use the next unused number
+each time (3, 4, …).
+
+The series name is always part of the upstream version on purpose:
+Launchpad keeps one orig tarball per `<package>_<upstream-version>` for the
+whole PPA and rejects a second upload whose bytes differ, so each series
+needs its own slot.
 
 ## Manual upload fallback
 
@@ -322,8 +403,9 @@ gh secret set GPG_PRIVATE_KEY --env ppa-release --repo ryanlovett-au/sshpiperd-p
 ### 5. Verify end-to-end
 
 Trigger a manual release against the current upstream tag to prove the
-new key signs successfully and Launchpad accepts it. Use a `+rot1`
-suffix so you get a fresh filename slot that doesn't collide with an
+new key signs successfully and Launchpad accepts it. Give it a rebuild
+number (the next one not yet used for this tag — see "Rebuilding a
+release") so you get a fresh version that doesn't collide with an
 already-published source for the same upstream version:
 
 ```bash
@@ -334,20 +416,12 @@ gh workflow run ppa-release.yml \
     --repo ryanlovett-au/sshpiperd-ppa \
     --ref main \
     --field upstream_tag="$TAG" \
-    --field upstream_suffix=+rot1 \
+    --field rebuild=2 \
     --field series=noble,resolute
 ```
 
-Also delete the existing `built/noble/$TAG` and `built/resolute/$TAG`
-marker tags first if they're present — otherwise `detect` will skip:
-
-```bash
-for s in noble resolute; do
-  gh api --method DELETE \
-    "/repos/ryanlovett-au/sshpiperd-ppa/git/refs/tags/built/${s}/${TAG}" \
-    2>/dev/null || true
-done
-```
+The existing `built/<series>/$TAG` marker tags can stay: a rebuild number
+bypasses the marker check.
 
 A clean run — Launchpad accepts both uploads and builds succeed — means
 the rotation is live.
